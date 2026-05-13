@@ -1,8 +1,70 @@
 [
   {
-    "date": "2023-01-03",
+    "date": "2024-01-02",
     "account": "A001",
     "event": "OPEN_ACCOUNT",
     "phase": "active_eval"
+  },
+  {
+    "date": "2024-04-17",
+    "account": "A001",
+    "event": "DAILY_LOCK",
+    "bucket_after": 750.0,
+    "equity": 23685.370893210005,
+    "ref_eod_high": 23935.370893210005
+  },
+  {
+    "date": "2024-11-04",
+    "account": "A001",
+    "event": "DAILY_LOCK",
+    "bucket_after": 500.0,
+    "equity": 26205.839080046957,
+    "ref_eod_high": 26455.839080046957
+  },
+  {
+    "date": "2024-11-05",
+    "account": "A001",
+    "event": "DAILY_LOCK",
+    "bucket_after": 250.0,
+    "equity": 26233.40991338029,
+    "ref_eod_high": 26483.40991338029
+  },
+  {
+    "date": "2024-11-14",
+    "account": "A001",
+    "event": "PASS_EVAL",
+    "equity_after_reset": 25000.0
+  },
+  {
+    "date": "2024-11-21",
+    "account": "A001",
+    "event": "DAILY_LOCK",
+    "bucket_after": 750.0,
+    "equity": 25183.5453897287,
+    "ref_eod_high": 25433.5453897287
+  },
+  {
+    "date": "2024-11-22",
+    "account": "A001",
+    "event": "WITHDRAW",
+    "amount": 102.53519486435107,
+    "pct": 0.5,
+    "profit_base": 205.07038972870214,
+    "equity_after": 25102.53519486435,
+    "cycle": 1
+  },
+  {
+    "date": "2024-11-22",
+    "account": "A002",
+    "event": "OPEN_ACCOUNT",
+    "phase": "active_eval"
+  },
+  {
+    "date": "2024-11-25",
+    "account": "A001",
+    "event": "DAILY_LOCK",
+    "bucket_after": 500.0,
+    "equity": 25032.020389728703,
+    "ref_eod_high": 25282.020389728703
   }
 ]

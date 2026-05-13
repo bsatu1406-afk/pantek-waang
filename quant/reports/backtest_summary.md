@@ -2,12 +2,12 @@
 
 ## Headline numbers
 
-- Accounts bought: **1**
-- Active at end: **1**
-- Purchase cost: **$80.00**
-- External cash withdrawn: **$0.00**
-- Total withdrawals (raw $): **$0.00** across **0** cycles
-- Ecosystem value (cash + active equity - purchase): **$25,685.39**
-- Trader net cashflow: **$-80.00**
+- Accounts bought: **2**
+- Active at end: **2**
+- Purchase cost: **$240.00**
+- External cash withdrawn: **$22.54**
+- Total withdrawals (raw $): **$102.54** across **1** cycles
+- Ecosystem value (cash + active equity - purchase): **$49,378.29**
+- Trader net cashflow: **$-217.46**
 
 See `per_account_detail.csv` and `monthly_cashflow.csv` for breakdowns.
