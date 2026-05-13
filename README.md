@@ -110,6 +110,21 @@ is ingested.
 | `DISABLE_HISTORICAL_BACKFILL`  | `false`                                | Set `true` to skip the historical pull (dev/testing).       |
 | `RATE_LIMIT_PER_MINUTE`        | `120`                                  | Per-API-key rate limit on `/v1/*`.                          |
 | `VITE_API_BASE_URL`            | `http://localhost:8000`                | Built into the frontend at build time.                      |
+| `GEX_REGIME_THRESHOLD`         | `0.2`                                  | Regime hysteresis deadband (Rev 3).                         |
+| `FLOW_SWEEP_MIN_PREMIUM`       | `50000`                                | Sweep detection floor in USD (Rev 3).                       |
+| `FLOW_BLOCK_MIN_SIZE`          | `100`                                  | Block detection floor in contracts (Rev 3).                 |
+| `FLOW_UOA_VOL_OI_RATIO`        | `2.0`                                  | UOA volume/OI threshold (Rev 3).                            |
+| `UPSERT_BATCH_SIZE`            | `1000`                                 | Buffered writer batch size (Rev 3).                         |
+| `INGESTION_MAX_PENDING_ROWS`   | `10000`                                | Per-writer backpressure cap (Rev 3).                        |
+| `INGESTION_DLQ_MAX_SIZE`       | `1000`                                 | Dead-letter queue ring-buffer cap (Rev 3).                  |
+| `INGESTION_REGISTRY_REFRESH_SECONDS` | `14400`                          | Live contract registry refresh interval (Rev 3).            |
+| `FUTURES_FEED_LAG_WARN_MS`     | `5000`                                 | Stale futures feed warn threshold (Rev 3).                  |
+| `MAX_WS_CONNECTIONS_PER_KEY`   | `5`                                    | Streaming API per-key cap (Rev 3).                          |
+
+For the complete Rev 3 hardening notes see [CHANGES.md](CHANGES.md) and
+[docs/rev3_plan.md](docs/rev3_plan.md). The streaming API and admin
+telemetry endpoints introduced in Rev 3 are documented in
+[docs/api_reference.md](docs/api_reference.md).
 
 ---
 
