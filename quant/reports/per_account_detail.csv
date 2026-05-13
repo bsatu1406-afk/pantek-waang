@@ -1,0 +1,2 @@
+id,buy_date,final_phase,pass_eval_date,breach_date,bucket_remaining,n_daily_locks,n_wd_cycles,n_wd_50pct,n_wd_80pct,total_withdrawn,final_equity,cum_pnl,winning_days_total,losing_days_total,n_trades,wr,best_day_pnl,worst_day_pnl
+A001,2023-01-03,active_eval,"","",1000.0,0,0,0,0,0.0,25765.39,765.39,213,38,928,0.7069,17.22,-6.72

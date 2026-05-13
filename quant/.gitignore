@@ -6,9 +6,9 @@ __pycache__/
 .ruff_cache/
 data/raw/
 data/processed/
-reports/*.csv
-reports/*.json
-!reports/.gitkeep
+# `reports/` IS the deliverable — keep CSV/JSON committed. Only ignore the
+# scratch sub-folder when developing locally.
+reports/scratch/
 *.egg-info/
 .coverage
 htmlcov/

@@ -1,0 +1,8 @@
+[
+  {
+    "date": "2023-01-03",
+    "account": "A001",
+    "event": "OPEN_ACCOUNT",
+    "phase": "active_eval"
+  }
+]

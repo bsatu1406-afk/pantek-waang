@@ -1,0 +1,185 @@
+{
+  "folds": [
+    {
+      "train_start": "2020-01-01",
+      "train_end": "2020-03-31",
+      "test_start": "2020-04-02",
+      "test_end": "2020-04-30",
+      "params_used": {
+        "baseline": true
+      },
+      "train_metrics": {
+        "wr": 0.5591,
+        "pf": 1.2,
+        "net_pnl": 91.0
+      },
+      "test_metrics": {
+        "wr": 0.5529000000000001,
+        "pf": 1.2,
+        "net_pnl": 29.0
+      }
+    },
+    {
+      "train_start": "2020-02-01",
+      "train_end": "2020-04-30",
+      "test_start": "2020-05-02",
+      "test_end": "2020-05-31",
+      "params_used": {
+        "baseline": true
+      },
+      "train_metrics": {
+        "wr": 0.559,
+        "pf": 1.2,
+        "net_pnl": 90.0
+      },
+      "test_metrics": {
+        "wr": 0.553,
+        "pf": 1.2,
+        "net_pnl": 30.0
+      }
+    },
+    {
+      "train_start": "2020-03-01",
+      "train_end": "2020-05-31",
+      "test_start": "2020-06-02",
+      "test_end": "2020-06-30",
+      "params_used": {
+        "baseline": true
+      },
+      "train_metrics": {
+        "wr": 0.5592,
+        "pf": 1.2,
+        "net_pnl": 92.0
+      },
+      "test_metrics": {
+        "wr": 0.5529000000000001,
+        "pf": 1.2,
+        "net_pnl": 29.0
+      }
+    },
+    {
+      "train_start": "2020-04-01",
+      "train_end": "2020-06-30",
+      "test_start": "2020-07-02",
+      "test_end": "2020-07-31",
+      "params_used": {
+        "baseline": true
+      },
+      "train_metrics": {
+        "wr": 0.5591,
+        "pf": 1.2,
+        "net_pnl": 91.0
+      },
+      "test_metrics": {
+        "wr": 0.553,
+        "pf": 1.2,
+        "net_pnl": 30.0
+      }
+    },
+    {
+      "train_start": "2020-05-01",
+      "train_end": "2020-07-31",
+      "test_start": "2020-08-02",
+      "test_end": "2020-08-31",
+      "params_used": {
+        "baseline": true
+      },
+      "train_metrics": {
+        "wr": 0.5592,
+        "pf": 1.2,
+        "net_pnl": 92.0
+      },
+      "test_metrics": {
+        "wr": 0.553,
+        "pf": 1.2,
+        "net_pnl": 30.0
+      }
+    },
+    {
+      "train_start": "2020-06-01",
+      "train_end": "2020-08-31",
+      "test_start": "2020-09-02",
+      "test_end": "2020-09-30",
+      "params_used": {
+        "baseline": true
+      },
+      "train_metrics": {
+        "wr": 0.5592,
+        "pf": 1.2,
+        "net_pnl": 92.0
+      },
+      "test_metrics": {
+        "wr": 0.5529000000000001,
+        "pf": 1.2,
+        "net_pnl": 29.0
+      }
+    },
+    {
+      "train_start": "2020-07-01",
+      "train_end": "2020-09-30",
+      "test_start": "2020-10-02",
+      "test_end": "2020-10-31",
+      "params_used": {
+        "baseline": true
+      },
+      "train_metrics": {
+        "wr": 0.5592,
+        "pf": 1.2,
+        "net_pnl": 92.0
+      },
+      "test_metrics": {
+        "wr": 0.553,
+        "pf": 1.2,
+        "net_pnl": 30.0
+      }
+    },
+    {
+      "train_start": "2020-08-01",
+      "train_end": "2020-10-31",
+      "test_start": "2020-11-02",
+      "test_end": "2020-11-30",
+      "params_used": {
+        "baseline": true
+      },
+      "train_metrics": {
+        "wr": 0.5592,
+        "pf": 1.2,
+        "net_pnl": 92.0
+      },
+      "test_metrics": {
+        "wr": 0.5529000000000001,
+        "pf": 1.2,
+        "net_pnl": 29.0
+      }
+    },
+    {
+      "train_start": "2020-09-01",
+      "train_end": "2020-11-30",
+      "test_start": "2020-12-02",
+      "test_end": "2020-12-31",
+      "params_used": {
+        "baseline": true
+      },
+      "train_metrics": {
+        "wr": 0.5591,
+        "pf": 1.2,
+        "net_pnl": 91.0
+      },
+      "test_metrics": {
+        "wr": 0.553,
+        "pf": 1.2,
+        "net_pnl": 30.0
+      }
+    }
+  ],
+  "aggregate": {
+    "wr_mean": 0.5529555555555556,
+    "wr_std": 4.969039949998985e-05,
+    "pf_mean": 1.2,
+    "pf_std": 0.0,
+    "net_pnl_mean": 29.555555555555557,
+    "net_pnl_std": 0.49690399499995325,
+    "n_folds": 9,
+    "n_positive_folds": 9
+  }
+}
