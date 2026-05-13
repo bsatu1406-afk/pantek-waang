@@ -44,7 +44,9 @@ def test_sweep_requires_multi_venue_same_side():
         _row(ts=pd.Timestamp("2026-01-02T14:30:00.020Z"), size=20, exchange="ARCA", price=1.01),
         _row(ts=pd.Timestamp("2026-01-02T14:30:00.080Z"), size=20, exchange="ISE", price=1.02),
     ])
+    # Disable the premium gate to isolate the multi-venue requirement.
     cfg = FlowEventConfig(sweep_window_ms=200, sweep_min_legs=3,
+                          sweep_min_premium=0.0,
                           block_min_size=10_000, uoa_min_absolute_volume=10_000_000,
                           uoa_volume_multiplier=1e9)
     events = detect_flow_events(trades, config=cfg)
@@ -62,6 +64,7 @@ def test_sweep_not_flagged_outside_window():
         _row(ts=pd.Timestamp("2026-01-02T14:32:00.000Z"), exchange="ISE"),
     ])
     cfg = FlowEventConfig(sweep_window_ms=200, sweep_min_legs=3,
+                          sweep_min_premium=0.0,
                           block_min_size=10_000, uoa_min_absolute_volume=10_000_000,
                           uoa_volume_multiplier=1e9)
     events = detect_flow_events(trades, config=cfg)
