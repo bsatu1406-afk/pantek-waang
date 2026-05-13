@@ -371,6 +371,12 @@ class _PipelineRunRecorder:
         metric_rows_written: int,
         missing_metric_types: list[str],
         error: str | None,
+        # Rev 4 additions — accept via **kwargs so older signatures keep
+        # working until every test in this file moves to them.
+        is_expiration_day: bool = False,
+        spot_source: str | None = None,
+        spot_price: float | None = None,
+        tau_0dte_years: float | None = None,
     ) -> None:
         self.finalizes.append(
             {
@@ -383,6 +389,10 @@ class _PipelineRunRecorder:
                 "metric_rows_written": metric_rows_written,
                 "missing_metric_types": list(missing_metric_types),
                 "error": error,
+                "is_expiration_day": is_expiration_day,
+                "spot_source": spot_source,
+                "spot_price": spot_price,
+                "tau_0dte_years": tau_0dte_years,
             }
         )
 
@@ -421,6 +431,14 @@ def _patch_pipeline_persistence(
         return snapshot
 
     monkeypatch.setattr(pipeline_mod, "load_latest_snapshot", fake_load)
+
+    # Rev 4: pipeline now calls resolve_spot inside the loader's session.
+    # Tests use a NoopAsyncSession, so we stub resolve_spot to return None
+    # (which leaves the chain's existing ``underlying_price`` untouched).
+    async def fake_resolve_spot(_symbol: str, _df: pd.DataFrame, _session: object) -> None:
+        return None
+
+    monkeypatch.setattr(pipeline_mod, "resolve_spot", fake_resolve_spot)
 
     def fake_fill_iv(df: pd.DataFrame, *, risk_free_rate: float) -> pd.DataFrame:
         return df
@@ -636,6 +654,8 @@ async def test_run_all_symbols_isolates_failures(
     monkeypatch.setattr(scheduler_mod, "run_pipeline_for_symbol", fake_run)
     monkeypatch.setattr(scheduler_mod, "run_flow_pipeline", fake_flow)
     monkeypatch.setattr(scheduler_mod, "run_alert_pipeline", fake_alert)
+    # Rev 4 scheduler skips outside RTH; force True for this unit test.
+    monkeypatch.setattr(scheduler_mod, "is_rth_now", lambda: True)
 
     class _Settings:
         supported_symbols = ["SPXW", "BOOM", "NDXP"]
@@ -677,6 +697,7 @@ async def test_run_all_symbols_bounds_concurrency(
     monkeypatch.setattr(scheduler_mod, "run_pipeline_for_symbol", fake_run)
     monkeypatch.setattr(scheduler_mod, "run_flow_pipeline", fake_flow)
     monkeypatch.setattr(scheduler_mod, "run_alert_pipeline", fake_alert)
+    monkeypatch.setattr(scheduler_mod, "is_rth_now", lambda: True)
 
     class _Settings:
         supported_symbols = ["A", "B", "C", "D", "E", "F", "G", "H"]
@@ -709,6 +730,7 @@ async def test_run_all_symbols_never_propagates_exceptions(
     monkeypatch.setattr(scheduler_mod, "run_pipeline_for_symbol", fake_run)
     monkeypatch.setattr(scheduler_mod, "run_flow_pipeline", fake_flow)
     monkeypatch.setattr(scheduler_mod, "run_alert_pipeline", fake_alert)
+    monkeypatch.setattr(scheduler_mod, "is_rth_now", lambda: True)
 
     class _Settings:
         supported_symbols = ["SPXW", "NDXP"]

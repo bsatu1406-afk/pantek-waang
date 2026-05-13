@@ -343,6 +343,11 @@ class PipelineRun(Base):
     Used by :func:`app.api.endpoints.admin.system_status` to answer
     "did the last cycle complete cleanly and produce all 25+ metric
     types?" without re-deriving from raw ``computed_metrics``.
+
+    Rev 4 adds four extra columns describing the 0DTE / spot state at
+    run time (``is_expiration_day``, ``spot_source``, ``spot_price``,
+    ``tau_0dte_years``) so operators can correlate a partial run with
+    "we lost the futures feed" vs. "the chain was empty".
     """
 
     __tablename__ = "pipeline_runs"
@@ -361,7 +366,7 @@ class PipelineRun(Base):
         Numeric(20, 3), nullable=False, default=0
     )
     status: Mapped[str] = mapped_column(Text, nullable=False, default="running")
-    """``running`` | ``ok`` | ``partial`` | ``failed``."""
+    """``running`` | ``ok`` | ``partial`` | ``failed`` | ``session_open`` | ``session_close``."""
     rows_read: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     metric_rows_written: Mapped[int] = mapped_column(
         BigInteger, nullable=False, default=0
@@ -370,6 +375,95 @@ class PipelineRun(Base):
         ARRAY(Text), nullable=False, default=list
     )
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # ── Rev 4 additions ──────────────────────────────────────────────
+    is_expiration_day: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    spot_source: Mapped[str | None] = mapped_column(Text, nullable=True)
+    """``futures_basis`` | ``parity`` | ``stale_cache`` | None."""
+    spot_price: Mapped[float | None] = mapped_column(Numeric(20, 6), nullable=True)
+    tau_0dte_years: Mapped[float | None] = mapped_column(
+        Numeric(20, 10), nullable=True
+    )
+
+
+class SessionEvent(Base):
+    """Lightweight audit log of session open / close / reset events.
+
+    Tiny table (2–4 rows per day per symbol). Not a hypertable.
+    """
+
+    __tablename__ = "session_events"
+
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, autoincrement=True
+    )
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+    """``session_open`` | ``session_close`` | ``reset`` | ``partial_open``."""
+    symbol: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ts: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=datetime.utcnow
+    )
+    extra_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+
+class MetricTypeRegistry(Base):
+    """Catalogue of every ``metric_type`` discriminator the platform writes.
+
+    Reference table used by the admin UI / docs — not by hot paths.
+    """
+
+    __tablename__ = "metric_type_registry"
+
+    metric_type: Mapped[str] = mapped_column(Text, primary_key=True)
+    category: Mapped[str | None] = mapped_column(Text, nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_0dte: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    added_in_rev: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class DatabentoApiKey(Base):
+    """Pool of fallback Databento API keys, per dataset.
+
+    Encrypted at rest with Fernet (key derived from ``JWT_SECRET``).
+    The ingester resolves the key list ordered by priority ASC for the
+    relevant dataset and fails over on auth / connect errors.
+    """
+
+    __tablename__ = "databento_api_keys"
+
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, autoincrement=True
+    )
+    label: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    dataset: Mapped[str] = mapped_column(Text, nullable=False)
+    """``OPRA.PILLAR`` | ``GLBX.MDP3`` | ``BOTH``."""
+    api_key_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    api_key_prefix: Mapped[str] = mapped_column(Text, nullable=False)
+    """First ~8 characters of the plaintext key, used purely for admin
+    UI identification. The full plaintext lives only in
+    ``api_key_encrypted``."""
+
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_error_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_error_msg: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=datetime.utcnow
+    )
+
+    __table_args__ = (
+        Index("ix_databento_keys_dataset_priority", "dataset", "priority"),
+    )
 
 
 class DeadLetterEntry(Base):

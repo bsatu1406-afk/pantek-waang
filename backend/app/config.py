@@ -101,6 +101,35 @@ class Settings(BaseSettings):
     )
     """Cap on simultaneous WebSocket connections per API key."""
 
+    # ── Rev 4: RTH / 0DTE / spot resolver ────────────────────────────────────
+    rth_open_time: str = Field(default="09:30", alias="RTH_OPEN_TIME")
+    """RTH session open in America/New_York. Format ``HH:MM``."""
+
+    rth_close_time: str = Field(default="16:15", alias="RTH_CLOSE_TIME")
+    """RTH session close in America/New_York. SPX/NDX cash options stop
+    trading at 16:00 ET; we keep a 15-minute buffer so the last pipeline
+    tick still emits."""
+
+    spot_parity_deviation_warn_pct: float = Field(
+        default=0.5, alias="SPOT_PARITY_DEVIATION_WARN_PCT"
+    )
+    """Log a WARNING when the futures-basis spot vs. parity spot differ by
+    more than this percent. Helps detect feed problems."""
+
+    spot_stale_cache_max_age_seconds: float = Field(
+        default=300.0, alias="SPOT_STALE_CACHE_MAX_AGE_SECONDS"
+    )
+    """Reject a stale-cache spot fallback older than this. Default 5 min."""
+
+    spot_basis_ema_alpha: float = Field(
+        default=0.1, alias="SPOT_BASIS_EMA_ALPHA"
+    )
+    """Smoothing factor (0–1) for the cash-minus-futures basis EMA."""
+
+    atm_band_pct_0dte: float = Field(default=0.005, alias="ATM_BAND_PCT_0DTE")
+    """Half-width of the ATM band used by 0DTE charm-rate computation.
+    0.005 ⇒ ±0.5% of spot (so a 10-pt window at SPX ≈ 5000)."""
+
     # ── Misc ─────────────────────────────────────────────────────────────────
     rate_limit_per_minute: int = Field(default=120, alias="RATE_LIMIT_PER_MINUTE")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")

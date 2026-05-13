@@ -31,7 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.core.logging import get_logger
-from app.db.models import ComputedMetric, PipelineRun
+from app.db.models import ComputedMetric, PipelineRun, SessionEvent
 from app.db.session import get_session_factory
 from app.processing.gex import GexSummary, compute_gex
 from app.processing.iv import IVSummary, compute_iv_summary, fill_missing_iv
@@ -40,6 +40,18 @@ from app.processing.max_pain import MaxPainSummary, compute_max_pain
 from app.processing.move_tracker import MoveSnapshot, compute_move_tracker
 from app.processing.pin_probability import compute_pin_probability
 from app.processing.regime import RegimeSummary, compute_regime
+from app.processing.session import (
+    is_expiration_day,
+    is_rth_now,
+    session_snapshot,
+    time_to_expiry_0dte_years,
+)
+from app.processing.spot import (
+    SpotResult,
+    reset_basis_cache,
+    resolve_spot,
+    spot_result_to_payload,
+)
 from app.processing.term_structure import compute_term_structure
 from app.processing.vanna_charm import GreekSummary, compute_charm, compute_vanna
 from app.processing.walls import WallsSummary, compute_walls
@@ -112,6 +124,8 @@ class PipelineResult:
     term_structure: list[dict]
     move_tracker: MoveSnapshot
     pin_probability: list[dict]
+    spot: SpotResult | None = None
+    session_state: dict[str, object] | None = None
 
 
 def _coverage_ok(df: pd.DataFrame) -> tuple[bool, dict[str, float]]:
@@ -509,6 +523,10 @@ async def _finalize_pipeline_run(
     metric_rows_written: int,
     missing_metric_types: list[str],
     error: str | None,
+    is_expiration_day: bool = False,
+    spot_source: str | None = None,
+    spot_price: float | None = None,
+    tau_0dte_years: float | None = None,
 ) -> None:
     """Update the previously-inserted ``pipeline_runs`` row with the result."""
     factory = get_session_factory()
@@ -526,6 +544,10 @@ async def _finalize_pipeline_run(
                     metric_rows_written=metric_rows_written,
                     missing_metric_types=missing_metric_types,
                     error=error,
+                    is_expiration_day=is_expiration_day,
+                    spot_source=spot_source,
+                    spot_price=spot_price,
+                    tau_0dte_years=tau_0dte_years,
                 )
             )
             await s.commit()
@@ -564,11 +586,23 @@ async def run_pipeline_for_symbol(symbol: str) -> PipelineResult | None:
     metric_rows_written: int = 0
     missing: list[str] = []
     result: PipelineResult | None = None
+    spot: SpotResult | None = None
+    sess_state = session_snapshot(symbol=symbol)
+    is_exp_today = bool(sess_state.get("is_expiration_day", False))
+    tau_years = float(sess_state.get("time_to_expiry_0dte_years", 0.0))
 
     try:
         async with factory() as session:
             df = await load_latest_snapshot(session, symbol)
+            # ── Rev 4: resolve spot via futures-first chain BEFORE metrics.
+            #     The result overrides ``underlying_price`` on every row so
+            #     every Greek computation downstream sees the same S.
+            spot = await resolve_spot(symbol, df, session)
         rows_read = int(len(df))
+
+        if spot is not None and not df.empty:
+            df = df.copy()
+            df["underlying_price"] = float(spot.price)
 
         if df.empty:
             logger.info("pipeline_no_data", symbol=symbol)
@@ -594,6 +628,8 @@ async def run_pipeline_for_symbol(symbol: str) -> PipelineResult | None:
                 missing = sorted(EXPECTED_METRIC_TYPES)
             else:
                 result = _compute_metrics(df=df, symbol=symbol, ts=ts, settings=settings)
+                result.spot = spot
+                result.session_state = sess_state
 
                 async with factory() as session:
                     metric_rows_written = await _persist_metrics(
@@ -628,6 +664,10 @@ async def run_pipeline_for_symbol(symbol: str) -> PipelineResult | None:
         metric_rows_written=metric_rows_written,
         missing_metric_types=missing,
         error=error_msg,
+        is_expiration_day=is_exp_today,
+        spot_source=spot.source if spot is not None else None,
+        spot_price=float(spot.price) if spot is not None else None,
+        tau_0dte_years=tau_years,
     )
 
     if result is not None:
@@ -747,3 +787,134 @@ def _compute_metrics(
         move_tracker=move_tracker,
         pin_probability=pin_probability,
     )
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Rev 4 — session lifecycle hooks
+# ────────────────────────────────────────────────────────────────────────────
+
+
+async def _record_session_event(
+    *,
+    event_type: str,
+    symbol: str | None,
+    extra: dict[str, object] | None = None,
+) -> None:
+    """Insert a row into ``session_events`` so the admin/inspector knows
+    when the scheduler last opened / closed / reset state."""
+    factory = get_session_factory()
+    async with factory() as s:
+        try:
+            s.add(
+                SessionEvent(
+                    event_type=event_type,
+                    symbol=symbol,
+                    extra_json=extra or {},
+                )
+            )
+            await s.commit()
+        except Exception:
+            await s.rollback()
+            logger.exception(
+                "session_event_persist_error",
+                event_type=event_type,
+                symbol=symbol,
+            )
+
+
+async def reset_session_state(symbols: list[str]) -> None:
+    """Wipe per-session caches at 09:29 ET.
+
+    * Clears the futures-basis EMA cache (each new session needs to
+      re-establish basis as the carry / dividend assumption may have
+      changed overnight).
+    * Inserts a ``session_open`` audit row per symbol so the timeline
+      view in /admin/inspector lines up cleanly.
+
+    HIRO accumulators live in :mod:`app.processing.hiro` and reset
+    automatically on the first call of a new session because that
+    module keys its bucket cumulative by trade-date.
+    """
+    logger.info("session.reset", symbols=symbols)
+    for symbol in symbols:
+        reset_basis_cache(symbol)
+        await _record_session_event(
+            event_type="session_open",
+            symbol=symbol,
+            extra={"reset_basis_cache": True},
+        )
+
+    # Sentinel pipeline_runs row so /admin/system/status can show
+    # "last session opened at HH:MM" without joining session_events.
+    factory = get_session_factory()
+    now = datetime.now(UTC)
+    async with factory() as s:
+        try:
+            for symbol in symbols:
+                s.add(
+                    PipelineRun(
+                        id=uuid.uuid4(),
+                        symbol=symbol,
+                        started_at=now,
+                        finished_at=now,
+                        duration_ms=0,
+                        status="session_open",
+                        is_expiration_day=is_expiration_day(symbol),
+                        tau_0dte_years=time_to_expiry_0dte_years(),
+                    )
+                )
+            await s.commit()
+        except Exception:
+            await s.rollback()
+            logger.exception("session_open_sentinel_persist_error")
+
+
+async def finalize_session(symbols: list[str]) -> None:
+    """End-of-session hook called at 16:16 ET.
+
+    Today this only records the close in ``session_events`` and writes a
+    sentinel ``pipeline_runs`` row. The richer end-of-day HIRO summary
+    is computed by the flow pipeline; this hook is the synchronization
+    point that tells everyone "no more frames after this".
+    """
+    logger.info("session.finalize", symbols=symbols)
+    for symbol in symbols:
+        await _record_session_event(
+            event_type="session_close",
+            symbol=symbol,
+            extra=None,
+        )
+
+    factory = get_session_factory()
+    now = datetime.now(UTC)
+    async with factory() as s:
+        try:
+            for symbol in symbols:
+                s.add(
+                    PipelineRun(
+                        id=uuid.uuid4(),
+                        symbol=symbol,
+                        started_at=now,
+                        finished_at=now,
+                        duration_ms=0,
+                        status="session_close",
+                        is_expiration_day=is_expiration_day(symbol),
+                        tau_0dte_years=0.0,
+                    )
+                )
+            await s.commit()
+        except Exception:
+            await s.rollback()
+            logger.exception("session_close_sentinel_persist_error")
+
+
+__all__ = [
+    "EXPECTED_METRIC_TYPES",
+    "MIN_COVERAGE_FRACTION",
+    "PipelineResult",
+    "finalize_session",
+    "is_rth_now",
+    "reset_session_state",
+    "run_pipeline_for_symbol",
+    "spot_result_to_payload",
+]
