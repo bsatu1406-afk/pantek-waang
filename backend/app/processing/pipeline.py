@@ -1,18 +1,37 @@
-"""Compute pipeline: load the latest snapshot, run all metrics, persist results."""
+"""Compute pipeline: load the latest snapshot, run all metrics, persist results.
+
+Rev 3 hardening (Agent 7):
+
+* Every ``_persist_metrics`` call is wrapped in a single DB transaction so a
+  partial failure rolls back cleanly — there is no half-written metric set.
+* The loader's snapshot is sanity-checked for minimum coverage (bid+ask **or**
+  IV present on ≥30% of rows). If neither holds, the tick is recorded as
+  ``partial`` in ``pipeline_runs`` and metric computation is skipped.
+* Every scheduler tick per symbol now persists a row to ``pipeline_runs``
+  with ``started_at`` / ``finished_at`` / ``duration_ms`` / ``status`` /
+  ``rows_read`` / ``metric_rows_written`` / ``missing_metric_types`` /
+  ``error``.
+* After ``_persist_metrics``, the latest ``metric_type`` set for the run's
+  ``(symbol, ts)`` is diffed against :data:`EXPECTED_METRIC_TYPES`. Any
+  shortfall is surfaced via ``missing_metric_types`` and downgrades the run
+  status from ``ok`` to ``partial``.
+"""
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from time import perf_counter
 
 import pandas as pd
+from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.core.logging import get_logger
-from app.db.models import ComputedMetric
+from app.db.models import ComputedMetric, PipelineRun
 from app.db.session import get_session_factory
 from app.processing.gex import GexSummary, compute_gex
 from app.processing.iv import IVSummary, compute_iv_summary, fill_missing_iv
@@ -26,6 +45,54 @@ from app.processing.vanna_charm import GreekSummary, compute_charm, compute_vann
 from app.processing.walls import WallsSummary, compute_walls
 
 logger = get_logger(__name__)
+
+
+# ── Completeness contract ────────────────────────────────────────────────────
+#
+# The canonical list of ``metric_type`` discriminators that a single chain-
+# pipeline tick is expected to produce for a "healthy" symbol. The list is
+# derived from the ``metric_type`` literals written by :func:`_persist_metrics`
+# below plus the Rev 3 additions (vanna/charm/term-structure/move-tracker/
+# pin-probability). After every tick we diff the latest persisted set against
+# this contract and surface the shortfall as ``pipeline_runs.missing_metric_types``.
+#
+# Metric types produced by *other* pipelines (``HIRO``, ``BASIS_SPX_ES``,
+# ``VOLUME_PROFILE_ES`` from the flow pipeline) are intentionally **not**
+# part of this contract — they run on their own cadence and we don't want
+# a slow flow pipeline to mark the chain pipeline as partial.
+EXPECTED_METRIC_TYPES: frozenset[str] = frozenset(
+    {
+        "GEX_NET_TOTAL",
+        "GEX_LEVEL",
+        "GEX_NET_TOTAL_VOL",
+        "GEX_LEVEL_VOL",
+        "MAX_PAIN",
+        "MAX_PAIN_AGG",
+        "CALL_WALL_OI",
+        "PUT_WALL_OI",
+        "CALL_WALL_VOL",
+        "PUT_WALL_VOL",
+        "ATM_IV",
+        "IV_SKEW",
+        "IV_SURFACE",
+        "REGIME_OI",
+        "REGIME_VOL",
+        "VANNA_NET_TOTAL",
+        "VANNA_LEVEL",
+        "CHARM_NET_TOTAL",
+        "CHARM_LEVEL",
+        "IV_TERM_STRUCTURE",
+        "RISK_REVERSAL_25D",
+        "MOVE_TRACKER",
+        "PIN_PROBABILITY",
+    }
+)
+
+# Minimum fraction of rows that must carry usable bid+ask **or** IV for a
+# snapshot to be considered worth computing on. Set deliberately low — we
+# want to compute when the feed is at least partially healthy, but flag
+# obviously-broken snapshots before they emit a fleet of zero metrics.
+MIN_COVERAGE_FRACTION: float = 0.30
 
 
 @dataclass
@@ -47,10 +114,58 @@ class PipelineResult:
     pin_probability: list[dict]
 
 
+def _coverage_ok(df: pd.DataFrame) -> tuple[bool, dict[str, float]]:
+    """Return (acceptable, diagnostics) for the loader's chain snapshot.
+
+    A snapshot is acceptable when **either**:
+
+    * ``bid`` *and* ``ask`` are present on at least
+      :data:`MIN_COVERAGE_FRACTION` of rows, **or**
+    * ``iv`` is present on at least :data:`MIN_COVERAGE_FRACTION` of rows.
+
+    Diagnostics are returned alongside so callers can log them as
+    structured context on the partial-run warning.
+    """
+    total = int(len(df))
+    if total == 0:
+        return False, {"rows_total": 0.0}
+
+    have_bid = float(df["bid"].notna().sum()) if "bid" in df.columns else 0.0
+    have_ask = float(df["ask"].notna().sum()) if "ask" in df.columns else 0.0
+    have_iv = float(df["iv"].notna().sum()) if "iv" in df.columns else 0.0
+    bid_ask_present = (
+        float(((df["bid"].notna()) & (df["ask"].notna())).sum())
+        if {"bid", "ask"}.issubset(df.columns)
+        else 0.0
+    )
+
+    quote_frac = bid_ask_present / total
+    iv_frac = have_iv / total
+    diagnostics = {
+        "rows_total": float(total),
+        "rows_with_bid": have_bid,
+        "rows_with_ask": have_ask,
+        "rows_with_bid_and_ask": bid_ask_present,
+        "rows_with_iv": have_iv,
+        "quote_fraction": round(quote_frac, 4),
+        "iv_fraction": round(iv_frac, 4),
+        "min_required_fraction": MIN_COVERAGE_FRACTION,
+    }
+    acceptable = (
+        quote_frac >= MIN_COVERAGE_FRACTION or iv_frac >= MIN_COVERAGE_FRACTION
+    )
+    return acceptable, diagnostics
+
+
 async def _persist_metrics(
     session: AsyncSession, *, symbol: str, ts: datetime, result: PipelineResult
 ) -> int:
-    """Upsert all metrics into ``computed_metrics``. Returns rows inserted."""
+    """Upsert all metrics into ``computed_metrics`` inside a single transaction.
+
+    If any statement in the transaction fails the entire upsert is rolled
+    back so the next tick observes the prior state, not a half-written one.
+    Returns the number of rows that would have been inserted.
+    """
     rows: list[dict] = []
     sentinel_expiry = pd.Timestamp("1970-01-01").date()
 
@@ -331,39 +446,216 @@ async def _persist_metrics(
             "extra_json": stmt.excluded.extra_json,
         },
     )
-    await session.execute(stmt)
-    await session.commit()
+    # Atomicity: a single execute is already a single statement, but we
+    # bracket commit/rollback explicitly so any future multi-statement
+    # additions inherit the same "all or nothing" semantics.
+    try:
+        await session.execute(stmt)
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        raise
     return len(rows)
 
 
+async def _latest_persisted_metric_types(
+    session: AsyncSession, *, symbol: str, ts: datetime
+) -> set[str]:
+    """Return the distinct ``metric_type`` set persisted at (symbol, ts)."""
+    stmt = (
+        select(ComputedMetric.metric_type)
+        .where(ComputedMetric.symbol == symbol)
+        .where(ComputedMetric.ts == ts)
+        .distinct()
+    )
+    res = await session.execute(stmt)
+    return {row[0] for row in res.all()}
+
+
+def _missing_metric_types(persisted: set[str]) -> list[str]:
+    """Diff a persisted set against :data:`EXPECTED_METRIC_TYPES`."""
+    return sorted(EXPECTED_METRIC_TYPES - persisted)
+
+
+async def _insert_pipeline_run(
+    *, run_id: uuid.UUID, symbol: str, started_at: datetime
+) -> None:
+    """Insert the initial ``pipeline_runs`` row with status='running'.
+
+    Uses its own session/transaction so the audit trail survives any
+    later rollback of the metrics transaction.
+    """
+    factory = get_session_factory()
+    async with factory() as s:
+        s.add(
+            PipelineRun(
+                id=run_id,
+                symbol=symbol,
+                started_at=started_at,
+                status="running",
+            )
+        )
+        await s.commit()
+
+
+async def _finalize_pipeline_run(
+    *,
+    run_id: uuid.UUID,
+    status: str,
+    started_at: datetime,
+    finished_at: datetime,
+    duration_ms: float,
+    rows_read: int,
+    metric_rows_written: int,
+    missing_metric_types: list[str],
+    error: str | None,
+) -> None:
+    """Update the previously-inserted ``pipeline_runs`` row with the result."""
+    factory = get_session_factory()
+    async with factory() as s:
+        try:
+            await s.execute(
+                update(PipelineRun)
+                .where(PipelineRun.id == run_id)
+                .values(
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    duration_ms=duration_ms,
+                    status=status,
+                    rows_read=rows_read,
+                    metric_rows_written=metric_rows_written,
+                    missing_metric_types=missing_metric_types,
+                    error=error,
+                )
+            )
+            await s.commit()
+        except Exception:
+            await s.rollback()
+            # Never let audit-log persistence kill the pipeline tick.
+            logger.exception(
+                "pipeline_run_persist_error", symbol=None, run_id=str(run_id)
+            )
+
+
 async def run_pipeline_for_symbol(symbol: str) -> PipelineResult | None:
+    """Run the chain pipeline for ``symbol`` once.
+
+    Every invocation persists exactly one ``pipeline_runs`` row regardless
+    of whether the tick produced metrics. The row's ``status`` follows:
+
+    * ``ok``       — snapshot loaded, coverage OK, ``_persist_metrics`` returned
+      a complete metric set.
+    * ``partial``  — snapshot was empty / under-covered / metric set missed
+      some of :data:`EXPECTED_METRIC_TYPES`.
+    * ``failed``   — an exception escaped one of the steps.
+    """
     settings = get_settings()
     factory = get_session_factory()
     started = perf_counter()
-    ts = datetime.now(UTC).replace(microsecond=0)
+    started_at = datetime.now(UTC)
+    ts = started_at.replace(microsecond=0)
 
-    async with factory() as session:
-        df = await load_latest_snapshot(session, symbol)
+    run_id = uuid.uuid4()
+    await _insert_pipeline_run(run_id=run_id, symbol=symbol, started_at=started_at)
 
-    if df.empty:
-        logger.info("pipeline_no_data", symbol=symbol)
-        return None
+    status: str = "ok"
+    error_msg: str | None = None
+    rows_read: int = 0
+    metric_rows_written: int = 0
+    missing: list[str] = []
+    result: PipelineResult | None = None
 
-    # Diagnostic: surface upstream feed-quality issues loudly. The pipeline
-    # silently emits zero-valued metrics when iv/greeks/spot can't be
-    # derived, which has historically masked subscription problems
-    # (e.g. the OPRA Pillar Standard plan ships trades + statistics +
-    # definitions but NOT cmbp-1 NBBO updates, so bid/ask stay null).
+    try:
+        async with factory() as session:
+            df = await load_latest_snapshot(session, symbol)
+        rows_read = int(len(df))
+
+        if df.empty:
+            logger.info("pipeline_no_data", symbol=symbol)
+            status = "partial"
+            missing = sorted(EXPECTED_METRIC_TYPES)
+        else:
+            # Run IV inversion before the coverage check so synthesized IV
+            # also counts toward the threshold.
+            df = fill_missing_iv(df, risk_free_rate=settings.risk_free_rate)
+            cov_ok, cov_diag = _coverage_ok(df)
+            if not cov_ok:
+                logger.warning(
+                    "pipeline_low_coverage",
+                    symbol=symbol,
+                    **cov_diag,
+                    hint=(
+                        "Skipping metric computation: neither bid+ask nor IV "
+                        f"meets the {MIN_COVERAGE_FRACTION:.0%} coverage "
+                        "threshold. Check feed health (cmbp-1 NBBO present?)."
+                    ),
+                )
+                status = "partial"
+                missing = sorted(EXPECTED_METRIC_TYPES)
+            else:
+                result = _compute_metrics(df=df, symbol=symbol, ts=ts, settings=settings)
+
+                async with factory() as session:
+                    metric_rows_written = await _persist_metrics(
+                        session, symbol=symbol, ts=ts, result=result
+                    )
+
+                async with factory() as session:
+                    persisted = await _latest_persisted_metric_types(
+                        session, symbol=symbol, ts=ts
+                    )
+                missing = _missing_metric_types(persisted)
+                status = "ok" if not missing else "partial"
+
+    except Exception as exc:  # noqa: BLE001
+        status = "failed"
+        error_msg = f"{type(exc).__name__}: {exc}"
+        # Drop the partially-computed result: callers must not consume
+        # metrics that were never persisted.
+        result = None
+        logger.exception("pipeline_error", symbol=symbol)
+
+    finished_at = datetime.now(UTC)
+    duration_ms = (perf_counter() - started) * 1000
+
+    await _finalize_pipeline_run(
+        run_id=run_id,
+        status=status,
+        started_at=started_at,
+        finished_at=finished_at,
+        duration_ms=duration_ms,
+        rows_read=rows_read,
+        metric_rows_written=metric_rows_written,
+        missing_metric_types=missing,
+        error=error_msg,
+    )
+
+    if result is not None:
+        result.duration_ms = duration_ms
+        logger.info(
+            "pipeline_complete",
+            symbol=symbol,
+            status=status,
+            duration_ms=duration_ms,
+            snapshot_rows=rows_read,
+            metric_rows=metric_rows_written,
+            missing=missing,
+        )
+    return result
+
+
+def _compute_metrics(
+    *,
+    df: pd.DataFrame,
+    symbol: str,
+    ts: datetime,
+    settings,
+) -> PipelineResult:
+    """Pure-CPU portion of the tick: compute every metric from the snapshot."""
     rows_total = int(len(df))
-    have_bid = int(df["bid"].notna().sum()) if "bid" in df.columns else 0
-    have_ask = int(df["ask"].notna().sum()) if "ask" in df.columns else 0
-    have_last = int(df["last_price"].notna().sum()) if "last_price" in df.columns else 0
     have_underlying = (
         int(df["underlying_price"].notna().sum()) if "underlying_price" in df.columns else 0
     )
-
-    df = fill_missing_iv(df, risk_free_rate=settings.risk_free_rate)
-
     have_iv = int(df["iv"].notna().sum()) if "iv" in df.columns else 0
     have_gamma = int(df["gamma"].notna().sum()) if "gamma" in df.columns else 0
 
@@ -372,9 +664,6 @@ async def run_pipeline_for_symbol(symbol: str) -> PipelineResult | None:
             "pipeline_no_underlying",
             symbol=symbol,
             rows=rows_total,
-            have_bid=have_bid,
-            have_ask=have_ask,
-            have_last=have_last,
             hint=(
                 "Spot synthesis failed — chain has no usable bid/ask or last_price. "
                 "Check ingester diagnostics in /admin/inspector for dropped schemas "
@@ -405,15 +694,13 @@ async def run_pipeline_for_symbol(symbol: str) -> PipelineResult | None:
     pin_probability = compute_pin_probability(
         df, risk_free_rate=settings.risk_free_rate
     )
-    # Open price is supplied externally — for now we don't have a session
-    # cache, so pass None (move_tracker will surface implied side only).
     move_tracker = compute_move_tracker(df, open_price=None)
 
-    result = PipelineResult(
+    return PipelineResult(
         symbol=symbol,
         ts=ts,
         duration_ms=0.0,
-        rows=int(len(df)),
+        rows=rows_total,
         gex=gex,
         gex_volume=gex_vol,
         max_pain=mp,
@@ -426,17 +713,3 @@ async def run_pipeline_for_symbol(symbol: str) -> PipelineResult | None:
         move_tracker=move_tracker,
         pin_probability=pin_probability,
     )
-
-    async with factory() as session:
-        inserted = await _persist_metrics(session, symbol=symbol, ts=ts, result=result)
-
-    duration_ms = (perf_counter() - started) * 1000
-    result.duration_ms = duration_ms
-    logger.info(
-        "pipeline_complete",
-        symbol=symbol,
-        duration_ms=duration_ms,
-        snapshot_rows=int(len(df)),
-        metric_rows=inserted,
-    )
-    return result
