@@ -30,7 +30,9 @@ export type ConnectionStatus = "connecting" | "open" | "reconnecting" | "closed"
 
 export interface GexStrike {
   strike: number;
-  gamma_exposure: number;
+  net_gex: number;
+  call_gex?: number;
+  put_gex?: number;
 }
 
 export interface GexPayload {

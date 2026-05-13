@@ -41,9 +41,9 @@ export function GexChart({ payload, title = "GEX", description }: GexChartProps)
   const data = useMemo(() => {
     const curve = payload?.curve ?? [];
     return [...curve]
-      .filter((p) => Number.isFinite(p.strike) && Number.isFinite(p.gamma_exposure))
+      .filter((p) => Number.isFinite(p.strike) && Number.isFinite(p.net_gex))
       .sort((a, b) => a.strike - b.strike)
-      .map((p) => ({ strike: p.strike, gex: p.gamma_exposure }));
+      .map((p) => ({ strike: p.strike, gex: p.net_gex }));
   }, [payload]);
 
   const zeroGamma = payload?.zero_gamma ?? null;
