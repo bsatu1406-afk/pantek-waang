@@ -50,12 +50,25 @@ def _empty(weight_col: str) -> GexSummary:
 
 
 def _gex_per_row(row: pd.Series, S: float, weight_col: str) -> float:
+    """Per-row dollar GEX with strict NaN/inf coercion.
+
+    Non-finite gamma/weight inputs collapse to 0 so they cannot leak into the
+    per-strike aggregate.
+    """
     gamma = row.get("gamma")
     weight = row.get(weight_col)
-    if gamma is None or weight is None or pd.isna(gamma) or pd.isna(weight):
+    try:
+        gamma_f = float(gamma) if gamma is not None else float("nan")
+        weight_f = float(weight) if weight is not None else float("nan")
+    except (TypeError, ValueError):
+        return 0.0
+    if not (np.isfinite(gamma_f) and np.isfinite(weight_f)):
         return 0.0
     sign = 1.0 if str(row.get("option_type", "")).upper() == "C" else -1.0
-    return float(sign * gamma * weight * CONTRACT_MULTIPLIER * (S**2) * ONE_PERCENT)
+    value = sign * gamma_f * weight_f * CONTRACT_MULTIPLIER * (S * S) * ONE_PERCENT
+    if not np.isfinite(value):
+        return 0.0
+    return float(value)
 
 
 def compute_gex(
@@ -77,10 +90,13 @@ def compute_gex(
     if df.empty or weight_col not in df.columns:
         return _empty(weight_col)
 
-    spot_series = df["underlying_price"].dropna()
+    spot_series = pd.to_numeric(df["underlying_price"], errors="coerce").dropna()
+    spot_series = spot_series[np.isfinite(spot_series)]
     if spot_series.empty:
         return _empty(weight_col)
     S = float(spot_series.iloc[-1])
+    if not np.isfinite(S) or S <= 0:
+        return _empty(weight_col)
 
     # Skip computation entirely if the requested weight is entirely null/zero.
     weight_series = pd.to_numeric(df[weight_col], errors="coerce").fillna(0)
@@ -99,6 +115,9 @@ def compute_gex(
     df[weight_col] = weight_series
     df["gex"] = df.apply(lambda r: _gex_per_row(r, S, weight_col), axis=1)
     df["option_type_u"] = df["option_type"].astype(str).str.upper()
+    # Defensive: pandas can produce NaN if a row missed the weight column.
+    df["gex"] = pd.to_numeric(df["gex"], errors="coerce").fillna(0.0)
+    df.loc[~np.isfinite(df["gex"]), "gex"] = 0.0
 
     call_sum = (
         df.loc[df["option_type_u"] == "C"]
@@ -116,10 +135,15 @@ def compute_gex(
         pd.merge(call_sum, put_sum, on="strike", how="outer")
         .fillna({"call_gex": 0.0, "put_gex": 0.0})
     )
+    curve_df["strike"] = pd.to_numeric(curve_df["strike"], errors="coerce")
+    curve_df = curve_df[np.isfinite(curve_df["strike"])].copy()
     curve_df["strike"] = curve_df["strike"].astype(float)
     curve_df["net_gex"] = curve_df["call_gex"] - curve_df["put_gex"].abs()
     curve_df = curve_df.sort_values("strike").reset_index(drop=True)
-    curve_df = curve_df.replace({np.nan: 0.0})
+    # Collapse any residual non-finite values to 0 so NaN/inf cannot reach the DB.
+    for col in ("call_gex", "put_gex", "net_gex"):
+        curve_df[col] = pd.to_numeric(curve_df[col], errors="coerce").fillna(0.0)
+        curve_df.loc[~np.isfinite(curve_df[col]), col] = 0.0
 
     top_pos = (
         curve_df.sort_values("net_gex", ascending=False).head(top_n).to_dict(orient="records")
@@ -132,9 +156,12 @@ def compute_gex(
         df, weight_col=weight_col, risk_free_rate=risk_free_rate
     )
 
+    net_total_raw = float(curve_df["net_gex"].sum())
+    net_total = net_total_raw if np.isfinite(net_total_raw) else 0.0
+
     return GexSummary(
         underlying_price=S,
-        net_total=float(curve_df["net_gex"].sum()),
+        net_total=net_total,
         curve=curve_df.to_dict(orient="records"),
         top_positive=top_pos,
         top_negative=top_neg,
