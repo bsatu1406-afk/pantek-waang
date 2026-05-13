@@ -54,3 +54,8 @@ Thumbs.db
 data/
 *.sqlite
 *.db
+
+# Whitelist subprojects' src/data even though root .gitignore excludes data/
+!quant/src/data/
+!quant/src/data/**
+

@@ -160,11 +160,16 @@ def run(
     if gen_fn is None:
         raise RuntimeError(f"specialist '{specialist_name}' missing generate_signals()")
     if params is None:
-        # Try to instantiate a default Params dataclass from the module
+        # Try to instantiate a default Params dataclass DEFINED in this module
+        # (exclude imports like SpecialistParams).
         params_cls = next(
             (
                 v for k, v in vars(mod).items()
-                if k.endswith("Params") and isinstance(v, type)
+                if (
+                    k.endswith("Params")
+                    and isinstance(v, type)
+                    and getattr(v, "__module__", "") == mod.__name__
+                )
             ),
             None,
         )
