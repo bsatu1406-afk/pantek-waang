@@ -84,3 +84,99 @@ async def test_admin_system_status(app_client):
     assert "rows_per_symbol" in body
     assert "active_api_keys" in body
     assert "last_compute_per_symbol" in body
+
+
+# ── Databento key pool (Rev 4) ──────────────────────────────────────────────
+
+
+async def test_databento_key_pool_crud(app_client):
+    token = await _login(app_client)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # LIST starts empty.
+    resp = await app_client.get("/admin/databento-keys", headers=headers)
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == []
+
+    # CREATE — OPRA.PILLAR primary.
+    resp = await app_client.post(
+        "/admin/databento-keys",
+        json={
+            "label": "Primary OPRA",
+            "dataset": "opra.pillar",  # lowercase ok — normalizes
+            "api_key": "db-superSecret-12345",
+            "priority": 1,
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["dataset"] == "OPRA.PILLAR"
+    assert body["api_key_prefix"].startswith("db-")
+    assert "superSecret" not in body["api_key_prefix"]
+    key_id = body["id"]
+
+    # CREATE — BOTH fallback.
+    resp = await app_client.post(
+        "/admin/databento-keys",
+        json={
+            "label": "Fallback Both",
+            "dataset": "both",
+            "api_key": "db-otherSecret-67890",
+            "priority": 200,
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 201
+
+    # CREATE — rejected dataset
+    resp = await app_client.post(
+        "/admin/databento-keys",
+        json={
+            "label": "Bad",
+            "dataset": "WHATEVER",
+            "api_key": "db-x",
+            "priority": 1,
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 422
+
+    # LIST returns both, ordered.
+    resp = await app_client.get("/admin/databento-keys", headers=headers)
+    assert resp.status_code == 200
+    rows = resp.json()
+    assert len(rows) == 2
+
+    # PATCH priority
+    resp = await app_client.patch(
+        f"/admin/databento-keys/{key_id}",
+        json={"priority": 999, "is_active": False},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["priority"] == 999
+    assert resp.json()["is_active"] is False
+
+    # TEST endpoint (decryption sanity check)
+    resp = await app_client.post(
+        f"/admin/databento-keys/{key_id}/test", headers=headers
+    )
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+
+    # DELETE
+    resp = await app_client.delete(
+        f"/admin/databento-keys/{key_id}", headers=headers
+    )
+    assert resp.status_code == 204
+
+    resp = await app_client.post(
+        f"/admin/databento-keys/{key_id}/test", headers=headers
+    )
+    assert resp.status_code == 404
+
+
+async def test_databento_key_requires_jwt(app_client):
+    resp = await app_client.get("/admin/databento-keys")
+    assert resp.status_code in (401, 403)

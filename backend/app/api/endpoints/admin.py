@@ -18,10 +18,15 @@ from app.api.schemas import (
     ApiKeyCreateResponse,
     ApiKeySummary,
     ApiKeyUpdate,
+    DatabentoKeyCreate,
+    DatabentoKeySummary,
+    DatabentoKeyTestResult,
+    DatabentoKeyUpdate,
     PipelineRunSummary,
     SystemStatus,
 )
 from app.config import get_settings
+from app.core.crypto import decrypt_secret, encrypt_secret, mask_prefix
 from app.core.security import (
     create_jwt_token,
     display_prefix,
@@ -32,6 +37,7 @@ from app.core.security import (
 from app.db.models import (
     ApiKey,
     ComputedMetric,
+    DatabentoApiKey,
     DeadLetterEntry,
     FlowEvent,
     FuturesTick,
@@ -303,4 +309,139 @@ async def system_status(
         flow_events_last_hour=flow_events_last_hour,
         last_pipeline_runs=last_runs,
         live_ingester=live_diag,
+    )
+
+
+# ── Databento API key pool (Rev 4) ───────────────────────────────────────────
+
+
+def _to_databento_summary(row: DatabentoApiKey) -> DatabentoKeySummary:
+    return DatabentoKeySummary(
+        id=row.id,
+        label=row.label,
+        dataset=row.dataset,
+        api_key_prefix=row.api_key_prefix,
+        priority=row.priority,
+        is_active=row.is_active,
+        last_used_at=row.last_used_at,
+        last_error_at=row.last_error_at,
+        last_error_msg=row.last_error_msg,
+        error_count=row.error_count,
+        created_at=row.created_at,
+    )
+
+
+@router.get("/databento-keys", response_model=list[DatabentoKeySummary])
+async def list_databento_keys(
+    _admin: Annotated[str, Depends(authenticate_admin)],
+    session: AsyncSession = Depends(get_db),
+) -> list[DatabentoKeySummary]:
+    """Operator-visible Databento key pool, sorted by dataset + priority."""
+    rows = (
+        await session.execute(
+            select(DatabentoApiKey).order_by(
+                DatabentoApiKey.dataset, DatabentoApiKey.priority, DatabentoApiKey.id
+            )
+        )
+    ).scalars().all()
+    return [_to_databento_summary(r) for r in rows]
+
+
+@router.post(
+    "/databento-keys",
+    response_model=DatabentoKeySummary,
+    status_code=201,
+)
+async def create_databento_key(
+    payload: DatabentoKeyCreate,
+    _admin: Annotated[str, Depends(authenticate_admin)],
+    session: AsyncSession = Depends(get_db),
+) -> DatabentoKeySummary:
+    record = DatabentoApiKey(
+        label=payload.label.strip(),
+        dataset=payload.dataset,
+        api_key_encrypted=encrypt_secret(payload.api_key),
+        api_key_prefix=mask_prefix(payload.api_key, chars=8),
+        priority=payload.priority,
+        is_active=payload.is_active,
+        error_count=0,
+    )
+    session.add(record)
+    await session.commit()
+    await session.refresh(record)
+    return _to_databento_summary(record)
+
+
+@router.patch("/databento-keys/{key_id}", response_model=DatabentoKeySummary)
+async def update_databento_key(
+    key_id: int,
+    payload: DatabentoKeyUpdate,
+    _admin: Annotated[str, Depends(authenticate_admin)],
+    session: AsyncSession = Depends(get_db),
+) -> DatabentoKeySummary:
+    row = await session.get(DatabentoApiKey, key_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Databento key not found")
+    if payload.label is not None:
+        row.label = payload.label.strip()
+    if payload.priority is not None:
+        row.priority = payload.priority
+    if payload.is_active is not None:
+        row.is_active = payload.is_active
+        # Disabling does NOT clear error_count — re-enabling means
+        # operator manually believes the key is healthy again.
+    await session.commit()
+    await session.refresh(row)
+    return _to_databento_summary(row)
+
+
+@router.delete(
+    "/databento-keys/{key_id}", status_code=204, response_class=Response
+)
+async def delete_databento_key(
+    key_id: int,
+    _admin: Annotated[str, Depends(authenticate_admin)],
+    session: AsyncSession = Depends(get_db),
+) -> Response:
+    row = await session.get(DatabentoApiKey, key_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Databento key not found")
+    await session.delete(row)
+    await session.commit()
+    return Response(status_code=204)
+
+
+@router.post(
+    "/databento-keys/{key_id}/test", response_model=DatabentoKeyTestResult
+)
+async def test_databento_key(
+    key_id: int,
+    _admin: Annotated[str, Depends(authenticate_admin)],
+    session: AsyncSession = Depends(get_db),
+) -> DatabentoKeyTestResult:
+    """Light-weight sanity check that the encrypted key can be decrypted.
+
+    A *real* network probe against Databento would require their CDN
+    to confirm the key, which we don't want to do from a synchronous
+    HTTP endpoint. The ingester records auth/connect errors against
+    ``error_count`` so the operator can see them on the listing.
+    """
+    row = await session.get(DatabentoApiKey, key_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Databento key not found")
+    try:
+        plaintext = decrypt_secret(row.api_key_encrypted)
+    except Exception as exc:  # noqa: BLE001
+        return DatabentoKeyTestResult(
+            ok=False,
+            message=(
+                f"Failed to decrypt stored key — JWT_SECRET may have changed: {exc}"
+            ),
+        )
+    return DatabentoKeyTestResult(
+        ok=True,
+        message=(
+            f"Stored key decrypts cleanly ({mask_prefix(plaintext, chars=6)}…). "
+            "Live verification is performed by the ingester on the next connect."
+        ),
     )

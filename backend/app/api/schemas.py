@@ -199,3 +199,57 @@ class DlqPage(BaseModel):
     limit: int
     offset: int
     items: list[DlqEntry] = Field(default_factory=list)
+
+
+# ── Databento API key pool (Rev 4) ───────────────────────────────────────────
+
+
+_DATASET_ALLOWED = {"OPRA.PILLAR", "GLBX.MDP3", "BOTH"}
+
+
+class DatabentoKeyCreate(BaseModel):
+    label: str = Field(min_length=1, max_length=200)
+    dataset: str
+    api_key: str = Field(min_length=8, max_length=512)
+    priority: int = Field(default=100, ge=0, le=10_000)
+    is_active: bool = True
+
+    @field_validator("dataset")
+    @classmethod
+    def _normalize_dataset(cls, v: str) -> str:
+        s = v.strip().upper()
+        if s not in _DATASET_ALLOWED:
+            raise ValueError(
+                f"dataset must be one of {sorted(_DATASET_ALLOWED)}, got {v!r}"
+            )
+        return s
+
+
+class DatabentoKeyUpdate(BaseModel):
+    label: str | None = Field(default=None, min_length=1, max_length=200)
+    priority: int | None = Field(default=None, ge=0, le=10_000)
+    is_active: bool | None = None
+
+    # We deliberately do NOT allow rotating the api_key/dataset via PATCH —
+    # the operator should delete + re-create. This keeps the audit story
+    # cleaner (one row = one secret).
+
+
+class DatabentoKeySummary(BaseModel):
+    id: int
+    label: str
+    dataset: str
+    api_key_prefix: str
+    priority: int
+    is_active: bool
+    last_used_at: datetime | None
+    last_error_at: datetime | None
+    last_error_msg: str | None
+    error_count: int
+    created_at: datetime
+
+
+class DatabentoKeyTestResult(BaseModel):
+    ok: bool
+    message: str
+    """Human-readable description of the test outcome."""

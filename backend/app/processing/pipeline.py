@@ -55,6 +55,12 @@ from app.processing.spot import (
 from app.processing.term_structure import compute_term_structure
 from app.processing.vanna_charm import GreekSummary, compute_charm, compute_vanna
 from app.processing.walls import WallsSummary, compute_walls
+from app.processing.zero_dte import (
+    BackMonthSummary,
+    ZeroDteSummary,
+    compute_back_month_summary,
+    compute_zero_dte_summary,
+)
 
 logger = get_logger(__name__)
 
@@ -97,6 +103,21 @@ EXPECTED_METRIC_TYPES: frozenset[str] = frozenset(
         "RISK_REVERSAL_25D",
         "MOVE_TRACKER",
         "PIN_PROBABILITY",
+        # Rev 4 — 0DTE + back-month split. These rows are always written;
+        # on non-0DTE days every 0DTE row has value=0 and an explanatory
+        # ``extra_json.reason`` so subscribers don't see gaps.
+        "GEX_0DTE_NET_TOTAL",
+        "GEX_0DTE_LEVEL",
+        "GEX_0DTE_NET_TOTAL_VOL",
+        "GEX_0DTE_LEVEL_VOL",
+        "GEX_BACK_NET_TOTAL",
+        "GEX_BACK_LEVEL",
+        "GEX_BACK_NET_TOTAL_VOL",
+        "GEX_BACK_LEVEL_VOL",
+        "CHARM_0DTE_NET_TOTAL",
+        "CHARM_0DTE_LEVEL",
+        "CHARM_0DTE_DECAY_RATE",
+        "GEX_0DTE_FLIP_SPEED",
     }
 )
 
@@ -105,6 +126,20 @@ EXPECTED_METRIC_TYPES: frozenset[str] = frozenset(
 # want to compute when the feed is at least partially healthy, but flag
 # obviously-broken snapshots before they emit a fleet of zero metrics.
 MIN_COVERAGE_FRACTION: float = 0.30
+
+
+# ── Rev 4: flip-speed cache (symbol → (prev_net_gex_0dte, prev_ts_seconds)) ─
+# Module-level so the next tick can compute Δ/Δt. Reset in
+# :func:`reset_session_state` so flip-speed doesn't carry overnight noise.
+_flip_speed_cache: dict[str, tuple[float, float]] = {}
+
+
+def reset_flip_speed_cache(symbol: str | None = None) -> None:
+    """Drop cached previous-tick GEX (used at session open + in tests)."""
+    if symbol is None:
+        _flip_speed_cache.clear()
+    else:
+        _flip_speed_cache.pop(symbol.upper(), None)
 
 
 @dataclass
@@ -126,6 +161,8 @@ class PipelineResult:
     pin_probability: list[dict]
     spot: SpotResult | None = None
     session_state: dict[str, object] | None = None
+    zero_dte: ZeroDteSummary | None = None
+    back_month: BackMonthSummary | None = None
 
 
 def _coverage_ok(df: pd.DataFrame) -> tuple[bool, dict[str, float]]:
@@ -447,6 +484,149 @@ async def _persist_metrics(
                 "extra_json": entry,
             }
         )
+
+    # ── Rev 4: 0DTE-specific + back-month split ──────────────────────────
+    # Always written, even on non-0DTE days, with value=0 and an
+    # explanatory ``extra_json.reason``. This keeps the completeness
+    # check happy and lets the UI distinguish "no 0DTE today" from
+    # "computation failed".
+    if result.zero_dte is not None:
+        zdte = result.zero_dte
+        reason = None if zdte.has_0dte else "no_0dte_today"
+        # Net totals (always one row, even when has_0dte=False).
+        for summary, total_type, level_type in (
+            (zdte.gex_oi, "GEX_0DTE_NET_TOTAL", "GEX_0DTE_LEVEL"),
+            (zdte.gex_vol, "GEX_0DTE_NET_TOTAL_VOL", "GEX_0DTE_LEVEL_VOL"),
+        ):
+            rows.append(
+                {
+                    "ts": ts,
+                    "symbol": symbol,
+                    "metric_type": total_type,
+                    "strike": 0,
+                    "expiration": sentinel_expiry,
+                    "computed_at": ts,
+                    "value": summary.net_total,
+                    "extra_json": {
+                        "underlying_price": summary.underlying_price,
+                        "curve": summary.curve,
+                        "top_positive": summary.top_positive,
+                        "top_negative": summary.top_negative,
+                        "zero_gamma": summary.zero_gamma,
+                        "tau_years": zdte.tau_years,
+                        "reason": reason,
+                    },
+                }
+            )
+            for level in summary.curve:
+                rows.append(
+                    {
+                        "ts": ts,
+                        "symbol": symbol,
+                        "metric_type": level_type,
+                        "strike": level["strike"],
+                        "expiration": sentinel_expiry,
+                        "computed_at": ts,
+                        "value": level.get("net_gex", 0.0),
+                        "extra_json": level,
+                    }
+                )
+
+        # Charm rows (0DTE cohort only).
+        rows.append(
+            {
+                "ts": ts,
+                "symbol": symbol,
+                "metric_type": "CHARM_0DTE_NET_TOTAL",
+                "strike": 0,
+                "expiration": sentinel_expiry,
+                "computed_at": ts,
+                "value": zdte.charm.net_total,
+                "extra_json": {
+                    "underlying_price": zdte.charm.underlying_price,
+                    "curve": zdte.charm.curve,
+                    "tau_years": zdte.tau_years,
+                    "reason": reason,
+                },
+            }
+        )
+        for level in zdte.charm.curve:
+            rows.append(
+                {
+                    "ts": ts,
+                    "symbol": symbol,
+                    "metric_type": "CHARM_0DTE_LEVEL",
+                    "strike": level["strike"],
+                    "expiration": sentinel_expiry,
+                    "computed_at": ts,
+                    "value": level.get("charm_exposure", 0.0),
+                    "extra_json": level,
+                }
+            )
+
+        # Scalars: decay rate + flip speed.
+        rows.append(
+            {
+                "ts": ts,
+                "symbol": symbol,
+                "metric_type": "CHARM_0DTE_DECAY_RATE",
+                "strike": 0,
+                "expiration": sentinel_expiry,
+                "computed_at": ts,
+                "value": zdte.charm_decay_rate,
+                "extra_json": {"reason": reason, "tau_years": zdte.tau_years},
+            }
+        )
+        rows.append(
+            {
+                "ts": ts,
+                "symbol": symbol,
+                "metric_type": "GEX_0DTE_FLIP_SPEED",
+                "strike": 0,
+                "expiration": sentinel_expiry,
+                "computed_at": ts,
+                "value": zdte.flip_speed,
+                "extra_json": {"reason": reason},
+            }
+        )
+
+    if result.back_month is not None:
+        bm = result.back_month
+        for summary, total_type, level_type in (
+            (bm.gex_oi, "GEX_BACK_NET_TOTAL", "GEX_BACK_LEVEL"),
+            (bm.gex_vol, "GEX_BACK_NET_TOTAL_VOL", "GEX_BACK_LEVEL_VOL"),
+        ):
+            rows.append(
+                {
+                    "ts": ts,
+                    "symbol": symbol,
+                    "metric_type": total_type,
+                    "strike": 0,
+                    "expiration": sentinel_expiry,
+                    "computed_at": ts,
+                    "value": summary.net_total,
+                    "extra_json": {
+                        "underlying_price": summary.underlying_price,
+                        "curve": summary.curve,
+                        "top_positive": summary.top_positive,
+                        "top_negative": summary.top_negative,
+                        "zero_gamma": summary.zero_gamma,
+                    },
+                }
+            )
+            for level in summary.curve:
+                rows.append(
+                    {
+                        "ts": ts,
+                        "symbol": symbol,
+                        "metric_type": level_type,
+                        "strike": level["strike"],
+                        "expiration": sentinel_expiry,
+                        "computed_at": ts,
+                        "value": level.get("net_gex", 0.0),
+                        "extra_json": level,
+                    }
+                )
 
     if not rows:
         return 0
@@ -770,6 +950,27 @@ def _compute_metrics(
     )
     move_tracker = compute_move_tracker(df, open_price=None)
 
+    # Rev 4 — 0DTE / back-month split. Pull the prior tick's 0DTE net GEX
+    # from the symbol-local cache so we can derive flip speed Δ/Δt.
+    prev = _flip_speed_cache.get(symbol)
+    now_ts_seconds = ts.timestamp()
+    prev_net_gex = prev[0] if prev is not None else None
+    prev_ts_seconds = prev[1] if prev is not None else None
+
+    zero_dte = compute_zero_dte_summary(
+        df,
+        risk_free_rate=settings.risk_free_rate,
+        atm_band_pct=getattr(settings, "atm_band_pct_0dte", 0.005),
+        prev_net_gex=prev_net_gex,
+        prev_ts_seconds=prev_ts_seconds,
+        now_ts_seconds=now_ts_seconds,
+    )
+    back_month = compute_back_month_summary(
+        df, risk_free_rate=settings.risk_free_rate
+    )
+    # Update flip-speed cache with this tick's OI-weighted 0DTE net GEX.
+    _flip_speed_cache[symbol] = (zero_dte.gex_oi.net_total, now_ts_seconds)
+
     return PipelineResult(
         symbol=symbol,
         ts=ts,
@@ -786,6 +987,8 @@ def _compute_metrics(
         term_structure=term_structure,
         move_tracker=move_tracker,
         pin_probability=pin_probability,
+        zero_dte=zero_dte,
+        back_month=back_month,
     )
 
 
@@ -838,10 +1041,11 @@ async def reset_session_state(symbols: list[str]) -> None:
     logger.info("session.reset", symbols=symbols)
     for symbol in symbols:
         reset_basis_cache(symbol)
+        reset_flip_speed_cache(symbol)
         await _record_session_event(
             event_type="session_open",
             symbol=symbol,
-            extra={"reset_basis_cache": True},
+            extra={"reset_basis_cache": True, "reset_flip_speed_cache": True},
         )
 
     # Sentinel pipeline_runs row so /admin/system/status can show
