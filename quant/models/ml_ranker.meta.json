@@ -1,0 +1,73 @@
+{
+  "cv": [
+    {
+      "fold": 1,
+      "n_train": 750,
+      "n_test": 750,
+      "auc": 0.6234460224130155,
+      "baseline_wr": 0.29733333333333334,
+      "top30_wr": 0.43555555555555553,
+      "lift_pp": 13.82222222222222
+    },
+    {
+      "fold": 2,
+      "n_train": 1500,
+      "n_test": 750,
+      "auc": 0.6305969840941954,
+      "baseline_wr": 0.31333333333333335,
+      "top30_wr": 0.43555555555555553,
+      "lift_pp": 12.222222222222218
+    },
+    {
+      "fold": 3,
+      "n_train": 2250,
+      "n_test": 750,
+      "auc": 0.6431226765799256,
+      "baseline_wr": 0.2826666666666667,
+      "top30_wr": 0.4266666666666667,
+      "lift_pp": 14.400000000000002
+    },
+    {
+      "fold": 4,
+      "n_train": 3000,
+      "n_test": 750,
+      "auc": 0.627394708994709,
+      "baseline_wr": 0.3,
+      "top30_wr": 0.4266666666666667,
+      "lift_pp": 12.666666666666671
+    }
+  ],
+  "summary": {
+    "n_folds": 4,
+    "mean_auc": 0.6311400980204613,
+    "mean_lift_pp": 13.277777777777779,
+    "min_auc": 0.6234460224130155,
+    "max_auc": 0.6431226765799256
+  },
+  "n_train_rows": 3750,
+  "class_balance": 0.29573333333333335,
+  "feature_columns": [
+    "side_long",
+    "hour_of_session",
+    "minute_of_session",
+    "rv_60s",
+    "rv_300s",
+    "rv_900s",
+    "atr_5",
+    "atr_20",
+    "atr_ratio",
+    "vol_zscore_60s",
+    "ret_60s",
+    "ret_300s",
+    "cum_ret_session",
+    "vwap_dist_atr",
+    "cvd_slope_60s",
+    "cvd_slope_300s",
+    "stop_distance_atr",
+    "target_distance_atr",
+    "rr_ratio",
+    "specialist_code",
+    "setup_code",
+    "confidence_in"
+  ]
+}
