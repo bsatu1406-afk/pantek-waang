@@ -50,21 +50,28 @@ def _empty(weight_col: str) -> GreekSummary:
     )
 
 
-def _prepare(df: pd.DataFrame, *, weight_col: str, today: pd.Timestamp | None):
+def _prepare(
+    df: pd.DataFrame,
+    *,
+    weight_col: str,
+    today: pd.Timestamp | None,
+) -> tuple[pd.DataFrame | None, float | None]:
     """Validate the chain DataFrame and return an array-friendly subset.
 
     Returns ``(work_df, S)`` or ``(None, None)`` if computation is not
-    possible (missing columns, empty chain, all-zero weights, …).
+    possible (missing columns, empty chain, all-zero weights, non-finite
+    spot, …).
     """
     required = {"strike", "option_type", "iv", "expiration", "underlying_price", weight_col}
     if df.empty or not required.issubset(df.columns):
         return None, None
 
-    spot_series = df["underlying_price"].dropna()
+    spot_series = pd.to_numeric(df["underlying_price"], errors="coerce").dropna()
+    spot_series = spot_series[np.isfinite(spot_series)]
     if spot_series.empty:
         return None, None
     S = float(spot_series.iloc[-1])
-    if S <= 0:
+    if not np.isfinite(S) or S <= 0:
         return None, None
 
     if today is None:
@@ -75,6 +82,7 @@ def _prepare(df: pd.DataFrame, *, weight_col: str, today: pd.Timestamp | None):
 
     work = df[["strike", "option_type", "iv", "expiration", weight_col]].copy()
     work["weight"] = pd.to_numeric(work[weight_col], errors="coerce").fillna(0.0)
+    work.loc[~np.isfinite(work["weight"]), "weight"] = 0.0
     work["iv"] = pd.to_numeric(work["iv"], errors="coerce")
     work["strike"] = pd.to_numeric(work["strike"], errors="coerce")
 
@@ -89,11 +97,15 @@ def _prepare(df: pd.DataFrame, *, weight_col: str, today: pd.Timestamp | None):
     work["tau"] = work["expiration"].apply(_tau)
     work = work[
         (work["weight"].abs() > 0)
+        & np.isfinite(work["weight"])
         & work["iv"].notna()
+        & np.isfinite(work["iv"])
         & (work["iv"] > 0)
         & work["strike"].notna()
+        & np.isfinite(work["strike"])
         & (work["strike"] > 0)
         & (work["tau"] > 0)
+        & np.isfinite(work["tau"])
     ]
     if work.empty:
         return None, None
@@ -102,19 +114,30 @@ def _prepare(df: pd.DataFrame, *, weight_col: str, today: pd.Timestamp | None):
 
 
 def _signed_aggregate(work: pd.DataFrame, value_col: str) -> pd.DataFrame:
-    """Sum ``value_col`` per strike, with calls positive and puts negative."""
+    """Sum ``value_col`` per strike, with calls positive and puts negative.
+
+    Non-finite per-row values (NaN/inf produced by extreme BSM inputs) are
+    zero-filled so they cannot poison the per-strike aggregate. This matches
+    the dealer-hedging sign convention shared with ``compute_gex``: long-call
+    customer flow is positive and long-put customer flow is negative.
+    """
     sign = np.where(
         work["option_type"].astype(str).str.upper() == "C", 1.0, -1.0
     )
     work = work.copy()
-    work["_signed"] = sign * work[value_col]
-    return (
+    raw = pd.to_numeric(work[value_col], errors="coerce").fillna(0.0)
+    raw = raw.where(np.isfinite(raw), 0.0)
+    work["_signed"] = sign * raw
+    out = (
         work.groupby("strike", as_index=False)["_signed"]
         .sum()
         .rename(columns={"_signed": value_col})
         .sort_values("strike")
         .reset_index(drop=True)
     )
+    out[value_col] = pd.to_numeric(out[value_col], errors="coerce").fillna(0.0)
+    out.loc[~np.isfinite(out[value_col]), value_col] = 0.0
+    return out
 
 
 def _summarise(curve_df: pd.DataFrame, value_col: str, *,
@@ -129,9 +152,12 @@ def _summarise(curve_df: pd.DataFrame, value_col: str, *,
         curve_df.sort_values(value_col, ascending=True).head(top_n)
         .to_dict(orient="records")
     )
+    net_total = float(curve_df[value_col].sum())
+    if not np.isfinite(net_total):
+        net_total = 0.0
     return GreekSummary(
         underlying_price=S,
-        net_total=float(curve_df[value_col].sum()),
+        net_total=net_total,
         curve=curve_df.to_dict(orient="records"),
         top_positive=top_pos,
         top_negative=top_neg,

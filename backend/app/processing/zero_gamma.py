@@ -48,20 +48,29 @@ def compute_zero_gamma(
     today: pd.Timestamp | None = None,
     search_pct: float = 0.05,
     n_points: int = 401,
+    fallback_to_closest: bool = False,
 ) -> float | None:
     """Hypothetical underlying ``S*`` at which aggregate dealer gamma = 0.
 
     See module docstring for the full methodology.
+
+    Args:
+        fallback_to_closest: When True, if the grid scan never crosses zero,
+            return the grid point with the smallest ``|aggregate gamma|``
+            (the closest-to-zero strike) rather than ``None``. The result is
+            guaranteed finite; non-finite intermediate values still cause a
+            ``None`` return.
     """
     required = {"strike", "option_type", "iv", "expiration", "underlying_price", weight_col}
     if df.empty or not required.issubset(df.columns):
         return None
 
-    spot_series = df["underlying_price"].dropna()
+    spot_series = pd.to_numeric(df["underlying_price"], errors="coerce").dropna()
+    spot_series = spot_series[np.isfinite(spot_series)]
     if spot_series.empty:
         return None
     spot = float(spot_series.iloc[-1])
-    if spot <= 0:
+    if not np.isfinite(spot) or spot <= 0:
         return None
 
     if today is None:
@@ -72,6 +81,7 @@ def compute_zero_gamma(
 
     work = df[["strike", "option_type", "iv", "expiration", weight_col]].copy()
     work["weight"] = pd.to_numeric(work[weight_col], errors="coerce").fillna(0.0)
+    work.loc[~np.isfinite(work["weight"]), "weight"] = 0.0
     work["iv"] = pd.to_numeric(work["iv"], errors="coerce")
     work["strike"] = pd.to_numeric(work["strike"], errors="coerce")
 
@@ -85,11 +95,15 @@ def compute_zero_gamma(
     work["tau"] = work["expiration"].apply(_tau)
     work = work[
         (work["weight"].abs() > 0)
+        & np.isfinite(work["weight"])
         & work["iv"].notna()
+        & np.isfinite(work["iv"])
         & (work["iv"] > 0)
         & work["strike"].notna()
+        & np.isfinite(work["strike"])
         & (work["strike"] > 0)
         & (work["tau"] > 0)
+        & np.isfinite(work["tau"])
     ]
     if work.empty:
         return None
@@ -136,13 +150,22 @@ def compute_zero_gamma(
     diffs = np.diff(signs)
     cross_idx = np.where(diffs != 0)[0]
     if cross_idx.size == 0:
-        return None
+        if not fallback_to_closest:
+            return None
+        # No sign flip inside the window: report the grid point with the
+        # smallest absolute dealer-gamma so consumers still get an
+        # actionable level instead of a NaN/None hole on the chart.
+        idx = int(np.argmin(np.abs(total_gex)))
+        value = float(s_grid[idx])
+        return value if np.isfinite(value) else None
 
     # Pick the crossing closest to current spot.
     nearest = int(cross_idx[np.argmin(np.abs(s_grid[cross_idx] - spot))])
     g0 = total_gex[nearest]
     g1 = total_gex[nearest + 1]
     if g1 == g0:
-        return float(s_grid[nearest])
+        result = float(s_grid[nearest])
+        return result if np.isfinite(result) else None
     frac = -g0 / (g1 - g0)
-    return float(s_grid[nearest] + frac * (s_grid[nearest + 1] - s_grid[nearest]))
+    result = float(s_grid[nearest] + frac * (s_grid[nearest + 1] - s_grid[nearest]))
+    return result if np.isfinite(result) else None
