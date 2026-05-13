@@ -1,0 +1,51 @@
+services:
+  db:
+    image: timescale/timescaledb:2.16.1-pg15
+    container_name: ofa-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-options}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-options}
+      POSTGRES_DB: ${POSTGRES_DB:-options_db}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    expose:
+      - "5432"
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ofa-backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Override DATABASE_URL inside Compose to use the "db" service hostname
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-options}:${POSTGRES_PASSWORD:-options}@db:5432/${POSTGRES_DB:-options_db}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
+    container_name: ofa-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "3000:80"
+
+volumes:
+  db_data:
