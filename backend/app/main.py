@@ -11,7 +11,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from slowapi.errors import RateLimitExceeded
 
 from app.api.deps import limiter
-from app.api.endpoints import admin, data, health, inspector
+from app.api.endpoints import (
+    admin,
+    data,
+    flow,
+    health,
+    hiro,
+    inspector,
+    snapshot,
+    stream,
+)
 from app.config import get_settings
 from app.core.logging import configure_logging, get_logger
 from app.db.session import dispose_engine
@@ -148,6 +157,14 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(health.router)
+    # Agent 5 streaming surface — registered BEFORE the broader data router so
+    # the comprehensive snapshot in ``snapshot.py`` takes precedence over the
+    # narrower legacy ``/v1/{symbol}/snapshot`` route registered by
+    # ``data.py``. Route order matters: Starlette matches in declaration order.
+    app.include_router(snapshot.router)
+    app.include_router(stream.router)
+    app.include_router(flow.router)
+    app.include_router(hiro.router)
     app.include_router(data.router)
     app.include_router(admin.router)
     app.include_router(inspector.router)

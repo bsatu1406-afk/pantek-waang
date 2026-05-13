@@ -641,7 +641,38 @@ async def run_pipeline_for_symbol(symbol: str) -> PipelineResult | None:
             metric_rows=metric_rows_written,
             missing=missing,
         )
+
+    # ── Agent 5 streaming hook ───────────────────────────────────────────
+    # Best-effort fan-out to any WS / SSE subscribers. Failures here must
+    # never poison the pipeline tick — log and move on.
+    if status == "ok":
+        try:
+            await _publish_streaming_snapshot(symbol)
+        except Exception:  # noqa: BLE001
+            logger.exception("streaming_publish_failed", symbol=symbol)
+
     return result
+
+
+async def _publish_streaming_snapshot(symbol: str) -> None:
+    """Build the comprehensive snapshot payload and broadcast to subscribers.
+
+    Imported lazily so the processing module stays decoupled from the API
+    surface at import time. The notifier itself drops the oldest queued
+    frame for slow subscribers, so this never blocks the pipeline.
+    """
+    from app.api.endpoints.snapshot import build_snapshot_payload
+    from app.api.stream_notifier import get_stream_notifier
+
+    notifier = get_stream_notifier()
+    if notifier.subscriber_count(symbol) == 0:
+        return
+    factory = get_session_factory()
+    async with factory() as session:
+        payload, computed_at = await build_snapshot_payload(session, symbol)
+    await notifier.publish(
+        symbol, {"data": payload, "computed_at": computed_at}
+    )
 
 
 def _compute_metrics(
