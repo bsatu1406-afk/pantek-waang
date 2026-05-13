@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
@@ -10,7 +10,13 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import limiter, require_symbol_access
-from app.api.schemas import DataEnvelope
+from app.api.schemas import (
+    DataEnvelope,
+    GexResponse,
+    IvResponse,
+    MaxPainResponse,
+    WallsResponse,
+)
 from app.config import get_settings
 from app.db.models import ComputedMetric
 from app.db.session import get_db
@@ -19,6 +25,30 @@ router = APIRouter()
 
 
 _SYMBOL_PATTERN = r"^[A-Za-z0-9_.-]+$"
+
+# GEX metric type per mode.
+_GEX_METRIC_BY_MODE: dict[str, str] = {
+    "oi": "GEX_NET_TOTAL",
+    "volume": "GEX_NET_TOTAL_VOL",
+}
+
+
+def _parse_iso_date_or_400(value: str, field: str) -> date:
+    """Parse ``YYYY-MM-DD`` strictly; raise HTTP 400 on malformed input.
+
+    We use 400 (not 422) because the value lives inside an open-ended
+    string ``Query`` rather than a typed parameter, so FastAPI's default
+    422 validation does not fire — we surface a deliberate ``400 Bad
+    Request`` so the client can distinguish "the date you sent is not a
+    valid ISO-8601 date" from a generic schema violation.
+    """
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field} must be 'nearest', 'all', or an ISO-8601 date (YYYY-MM-DD)",
+        ) from exc
 
 
 async def _latest_metrics(
@@ -61,38 +91,48 @@ def _envelope(symbol: str, computed_at: datetime | None, data: dict[str, Any]) -
 # ── /v1/{symbol}/gex ────────────────────────────────────────────────────────
 
 
-@router.get("/v1/{symbol}/gex", response_model=DataEnvelope)
+@router.get("/v1/{symbol}/gex", response_model=DataEnvelope[GexResponse])
 @limiter.limit(lambda: f"{get_settings().rate_limit_per_minute}/minute")
 async def get_gex(
     request: Request,  # noqa: ARG001
     symbol: str = Path(..., min_length=1, max_length=20, pattern=_SYMBOL_PATTERN),
-    mode: str = Query("oi", pattern="^(oi|volume)$"),  # noqa: ARG001 - reserved for future use
+    mode: str = Query("oi", pattern="^(oi|volume)$"),
     expiry: str = Query("all"),  # noqa: ARG001 - reserved for future use
     session: AsyncSession = Depends(get_db),
     _api_key=Depends(require_symbol_access()),
 ) -> DataEnvelope:
-    rows = await _latest_metrics(session, symbol.upper(), "GEX_NET_TOTAL")
+    metric_type = _GEX_METRIC_BY_MODE[mode]
+    rows = await _latest_metrics(session, symbol.upper(), metric_type)
     if not rows:
         return _envelope(symbol, None, {"net_total": 0.0, "curve": [], "top_positive": [], "top_negative": []})
     row = rows[0]
     payload = dict(row.extra_json or {})
     payload["net_total"] = float(row.value or 0)
+    payload.setdefault("curve", [])
+    payload.setdefault("top_positive", [])
+    payload.setdefault("top_negative", [])
     return _envelope(symbol, row.ts, payload)
 
 
 # ── /v1/{symbol}/max-pain ───────────────────────────────────────────────────
 
 
-@router.get("/v1/{symbol}/max-pain", response_model=DataEnvelope)
+@router.get("/v1/{symbol}/max-pain", response_model=DataEnvelope[MaxPainResponse])
 @limiter.limit(lambda: f"{get_settings().rate_limit_per_minute}/minute")
 async def get_max_pain(
     request: Request,  # noqa: ARG001
     symbol: str = Path(..., min_length=1, max_length=20, pattern=_SYMBOL_PATTERN),
-    expiry: str = Query("nearest"),
+    expiry: str = Query("nearest", min_length=1, max_length=10),
     session: AsyncSession = Depends(get_db),
     _api_key=Depends(require_symbol_access()),
 ) -> DataEnvelope:
     sym = symbol.upper()
+
+    # Strict validation: expiry must be 'nearest', 'all' or a real ISO date.
+    target_date: date | None = None
+    if expiry not in ("nearest", "all"):
+        target_date = _parse_iso_date_or_400(expiry, "expiry")
+
     per_expiry_rows = await _latest_metrics(session, sym, "MAX_PAIN")
     aggregate_rows = await _latest_metrics(session, sym, "MAX_PAIN_AGG")
 
@@ -107,8 +147,8 @@ async def get_max_pain(
         ],
         key=lambda x: x["expiration"],
     )
-    if expiry != "nearest" and expiry != "all":
-        per_expiry = [e for e in per_expiry if e["expiration"] == expiry]
+    if target_date is not None:
+        per_expiry = [e for e in per_expiry if e["expiration"] == target_date.isoformat()]
     elif expiry == "nearest":
         per_expiry = per_expiry[:1]
 
@@ -153,7 +193,7 @@ async def _walls_payload(session: AsyncSession, symbol: str, mode: str) -> dict:
     return {"computed_at": computed_at, "payload": payload}
 
 
-@router.get("/v1/{symbol}/walls", response_model=DataEnvelope)
+@router.get("/v1/{symbol}/walls", response_model=DataEnvelope[WallsResponse])
 @limiter.limit(lambda: f"{get_settings().rate_limit_per_minute}/minute")
 async def get_walls(
     request: Request,  # noqa: ARG001
@@ -163,13 +203,20 @@ async def get_walls(
     _api_key=Depends(require_symbol_access()),
 ) -> DataEnvelope:
     res = await _walls_payload(session, symbol.upper(), mode)
-    return _envelope(symbol, res["computed_at"], res["payload"])
+    payload: dict[str, Any] = {
+        "call_wall_oi": [],
+        "put_wall_oi": [],
+        "call_wall_volume": [],
+        "put_wall_volume": [],
+    }
+    payload.update(res["payload"])
+    return _envelope(symbol, res["computed_at"], payload)
 
 
 # ── /v1/{symbol}/iv ─────────────────────────────────────────────────────────
 
 
-@router.get("/v1/{symbol}/iv", response_model=DataEnvelope)
+@router.get("/v1/{symbol}/iv", response_model=DataEnvelope[IvResponse])
 @limiter.limit(lambda: f"{get_settings().rate_limit_per_minute}/minute")
 async def get_iv(
     request: Request,  # noqa: ARG001
@@ -189,7 +236,18 @@ async def get_iv(
     computed_at = (
         atm_rows[0].ts if atm_rows else (skew_rows[0].ts if skew_rows else (surface_rows[0].ts if surface_rows else None))
     )
-    return _envelope(symbol, computed_at, {"atm_iv": atm, "skew_per_expiry": skew, "surface": surface})
+    # ``skew_per_expiry`` is kept for backward compatibility with existing
+    # consumers; ``skew`` is the new typed-schema name.
+    return _envelope(
+        symbol,
+        computed_at,
+        {
+            "atm_iv": atm,
+            "skew": skew,
+            "skew_per_expiry": skew,
+            "surface": surface,
+        },
+    )
 
 
 # ── /v1/{symbol}/snapshot ───────────────────────────────────────────────────
