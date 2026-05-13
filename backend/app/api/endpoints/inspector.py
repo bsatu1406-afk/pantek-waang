@@ -20,16 +20,18 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import authenticate_admin
+from app.api.schemas import DlqEntry, DlqPage
 from app.config import get_settings
 from app.db.models import (
     AlertEvent,
     AlertRule,
     ComputedMetric,
+    DeadLetterEntry,
     EodOpenInterest,
     FlowEvent,
     FuturesTick,
@@ -389,3 +391,48 @@ def _pct(part: Any, total: int) -> float | None:
     except (TypeError, ValueError):
         return None
     return round(100.0 * p / total, 1)
+
+
+# ── DLQ paginated inspector ────────────────────────────────────────────────
+
+
+@router.get("/dlq", response_model=DlqPage)
+async def dlq_inspector(
+    _admin: Annotated[str, Depends(authenticate_admin)],
+    session: AsyncSession = Depends(get_db),
+    limit: int = Query(50, gt=0, le=500),
+    offset: int = Query(0, ge=0),
+) -> DlqPage:
+    """Paginated read-only view of the dead-letter queue.
+
+    ``limit`` defaults to 50 and is capped at 500; ``offset`` defaults to 0.
+    Out-of-range values return ``422 Unprocessable Entity`` via FastAPI's
+    built-in query-param validation (``gt=0``, ``le=500``, ``ge=0``).
+    """
+    total = int(
+        (
+            await session.execute(
+                select(func.count()).select_from(DeadLetterEntry)
+            )
+        ).scalar_one()
+        or 0
+    )
+    rows = (
+        await session.execute(
+            select(DeadLetterEntry)
+            .order_by(desc(DeadLetterEntry.ts))
+            .limit(limit)
+            .offset(offset)
+        )
+    ).scalars().all()
+    items = [
+        DlqEntry(
+            id=row.id,
+            ts=row.ts,
+            source=row.source,
+            reason=row.reason,
+            payload=row.payload,
+        )
+        for row in rows
+    ]
+    return DlqPage(total=total, limit=limit, offset=offset, items=items)
