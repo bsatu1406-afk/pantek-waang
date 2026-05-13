@@ -46,7 +46,20 @@ def run_backtest(
     use_ml: bool = False,
     use_risk: bool = False,
     max_active: int = 8,
+    initial_accounts: int = 1,
+    initial_capital: float = 0.0,
 ) -> dict:
+    """Run an end-to-end backtest.
+
+    Parameters
+    ----------
+    initial_accounts : how many accounts to buy on day 0 (trader's initial
+        fleet). Each costs ACCOUNT_COST and is tracked in `purchase_cost`.
+    initial_capital : starting external_cash for the trader (in addition
+        to the accounts they buy upfront). This lets the simulation honor
+        a realistic starting bankroll so a few early breaches do not end
+        the run before any withdrawals can spawn replacements.
+    """
     cfg = EnsembleConfig(
         enabled_specialists=specialists,
         use_ml_ranker=use_ml,
@@ -54,13 +67,16 @@ def run_backtest(
     )
     ens = Ensemble(cfg)
     eng = PropFirmEngine(max_active=max_active)
-    # Seed first account
+    # Seed first account(s)
     loader = BarLoader()
     available_dates = [d for d in loader.available_session_dates() if start <= d <= end]
     if not available_dates:
         log.error("no bars available in [%s, %s]", start, end)
         return {}
-    eng.open_account(available_dates[0])
+    if initial_capital > 0:
+        eng.external_cash = initial_capital
+    for i in range(max(1, initial_accounts)):
+        eng.open_account(available_dates[0])
 
     for sd in available_dates:
         bars = loader.load_session(sd)
@@ -216,6 +232,10 @@ def main() -> int:
     p.add_argument("--ml", action="store_true")
     p.add_argument("--risk", action="store_true")
     p.add_argument("--max-active", type=int, default=8)
+    p.add_argument("--initial-accounts", type=int, default=1,
+                   help="How many accounts to buy on day 0 (default 1).")
+    p.add_argument("--initial-capital", type=float, default=0.0,
+                   help="Starting external_cash for the trader (default 0).")
     args = p.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     if not args.specialists:
@@ -228,6 +248,8 @@ def main() -> int:
         use_ml=args.ml,
         use_risk=args.risk,
         max_active=args.max_active,
+        initial_accounts=args.initial_accounts,
+        initial_capital=args.initial_capital,
     )
     eng = res["engine"]
     write_per_account_csv(eng, REPORTS_DIR / "per_account_detail.csv")
