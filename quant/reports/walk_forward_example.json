@@ -1,185 +1,410 @@
 {
+  "train_months": 12,
+  "test_months": 3,
+  "step_months": 3,
+  "purge_days": 1,
   "folds": [
     {
       "train_start": "2020-01-01",
-      "train_end": "2020-03-31",
-      "test_start": "2020-04-02",
-      "test_end": "2020-04-30",
-      "params_used": {
-        "baseline": true
-      },
+      "train_end": "2020-12-31",
+      "test_start": "2021-01-02",
+      "test_end": "2021-04-01",
       "train_metrics": {
-        "wr": 0.5591,
-        "pf": 1.2,
-        "net_pnl": 91.0
+        "wr": 0.5040755595807996,
+        "pf": 1.0229635522567542,
+        "net_pnl": 697.1516066211825,
+        "trades": 15458,
+        "total_withdrawn": 0.0,
+        "breach": false
       },
       "test_metrics": {
-        "wr": 0.5529000000000001,
-        "pf": 1.2,
-        "net_pnl": 29.0
-      }
-    },
-    {
-      "train_start": "2020-02-01",
-      "train_end": "2020-04-30",
-      "test_start": "2020-05-02",
-      "test_end": "2020-05-31",
+        "wr": 0.4992055084745763,
+        "pf": 1.0035283932685621,
+        "net_pnl": 27.11269560891651,
+        "trades": 3776,
+        "total_withdrawn": 0.0,
+        "breach": false
+      },
       "params_used": {
-        "baseline": true
-      },
-      "train_metrics": {
-        "wr": 0.559,
-        "pf": 1.2,
-        "net_pnl": 90.0
-      },
-      "test_metrics": {
-        "wr": 0.553,
-        "pf": 1.2,
-        "net_pnl": 30.0
-      }
-    },
-    {
-      "train_start": "2020-03-01",
-      "train_end": "2020-05-31",
-      "test_start": "2020-06-02",
-      "test_end": "2020-06-30",
-      "params_used": {
-        "baseline": true
-      },
-      "train_metrics": {
-        "wr": 0.5592,
-        "pf": 1.2,
-        "net_pnl": 92.0
-      },
-      "test_metrics": {
-        "wr": 0.5529000000000001,
-        "pf": 1.2,
-        "net_pnl": 29.0
+        "sma_window": 20,
+        "train_score": 0.5040755595807996
       }
     },
     {
       "train_start": "2020-04-01",
-      "train_end": "2020-06-30",
-      "test_start": "2020-07-02",
-      "test_end": "2020-07-31",
-      "params_used": {
-        "baseline": true
-      },
+      "train_end": "2021-03-31",
+      "test_start": "2021-04-02",
+      "test_end": "2021-07-01",
       "train_metrics": {
-        "wr": 0.5591,
-        "pf": 1.2,
-        "net_pnl": 91.0
+        "wr": 0.5060718228456393,
+        "pf": 1.0344261934507066,
+        "net_pnl": 1037.8839297584773,
+        "trades": 15399,
+        "total_withdrawn": 0.0,
+        "breach": false
       },
       "test_metrics": {
-        "wr": 0.553,
-        "pf": 1.2,
-        "net_pnl": 30.0
-      }
-    },
-    {
-      "train_start": "2020-05-01",
-      "train_end": "2020-07-31",
-      "test_start": "2020-08-02",
-      "test_end": "2020-08-31",
+        "wr": 0.5050847457627119,
+        "pf": 0.97555348293018,
+        "net_pnl": -187.44827485208134,
+        "trades": 3835,
+        "total_withdrawn": 0.0,
+        "breach": false
+      },
       "params_used": {
-        "baseline": true
-      },
-      "train_metrics": {
-        "wr": 0.5592,
-        "pf": 1.2,
-        "net_pnl": 92.0
-      },
-      "test_metrics": {
-        "wr": 0.553,
-        "pf": 1.2,
-        "net_pnl": 30.0
-      }
-    },
-    {
-      "train_start": "2020-06-01",
-      "train_end": "2020-08-31",
-      "test_start": "2020-09-02",
-      "test_end": "2020-09-30",
-      "params_used": {
-        "baseline": true
-      },
-      "train_metrics": {
-        "wr": 0.5592,
-        "pf": 1.2,
-        "net_pnl": 92.0
-      },
-      "test_metrics": {
-        "wr": 0.5529000000000001,
-        "pf": 1.2,
-        "net_pnl": 29.0
+        "sma_window": 20,
+        "train_score": 0.5060718228456393
       }
     },
     {
       "train_start": "2020-07-01",
-      "train_end": "2020-09-30",
-      "test_start": "2020-10-02",
-      "test_end": "2020-10-31",
-      "params_used": {
-        "baseline": true
-      },
+      "train_end": "2021-06-30",
+      "test_start": "2021-07-02",
+      "test_end": "2021-10-01",
       "train_metrics": {
-        "wr": 0.5592,
-        "pf": 1.2,
-        "net_pnl": 92.0
+        "wr": 0.5053574907461523,
+        "pf": 1.012777700238126,
+        "net_pnl": 388.94186121695384,
+        "trades": 15399,
+        "total_withdrawn": 0.0,
+        "breach": false
       },
       "test_metrics": {
-        "wr": 0.553,
-        "pf": 1.2,
-        "net_pnl": 30.0
+        "wr": 0.5035952747817155,
+        "pf": 1.0095280080813716,
+        "net_pnl": 73.8142576535347,
+        "trades": 3894,
+        "total_withdrawn": 0.0,
+        "breach": false
+      },
+      "params_used": {
+        "sma_window": 20,
+        "train_score": 0.5053574907461523
       }
     },
     {
-      "train_start": "2020-08-01",
-      "train_end": "2020-10-31",
-      "test_start": "2020-11-02",
-      "test_end": "2020-11-30",
-      "params_used": {
-        "baseline": true
-      },
+      "train_start": "2020-10-01",
+      "train_end": "2021-09-30",
+      "test_start": "2021-10-02",
+      "test_end": "2022-01-01",
       "train_metrics": {
-        "wr": 0.5592,
-        "pf": 1.2,
-        "net_pnl": 92.0
+        "wr": 0.5038638872654069,
+        "pf": 1.001166514252565,
+        "net_pnl": 35.76962513080616,
+        "trades": 15399,
+        "total_withdrawn": 0.0,
+        "breach": false
       },
       "test_metrics": {
-        "wr": 0.5529000000000001,
-        "pf": 1.2,
-        "net_pnl": 29.0
+        "wr": 0.49882659713168187,
+        "pf": 0.9416814890105055,
+        "net_pnl": -472.5849605045778,
+        "trades": 3835,
+        "total_withdrawn": 0.0,
+        "breach": false
+      },
+      "params_used": {
+        "sma_window": 20,
+        "train_score": 0.5038638872654069
       }
     },
     {
-      "train_start": "2020-09-01",
-      "train_end": "2020-11-30",
-      "test_start": "2020-12-02",
-      "test_end": "2020-12-31",
-      "params_used": {
-        "baseline": true
-      },
+      "train_start": "2021-01-01",
+      "train_end": "2021-12-31",
+      "test_start": "2022-01-02",
+      "test_end": "2022-04-01",
       "train_metrics": {
-        "wr": 0.5591,
-        "pf": 1.2,
-        "net_pnl": 91.0
+        "wr": 0.5021105266575752,
+        "pf": 0.9832196519889884,
+        "net_pnl": -525.0155673745303,
+        "trades": 15399,
+        "total_withdrawn": 0.0,
+        "breach": false
       },
       "test_metrics": {
-        "wr": 0.553,
-        "pf": 1.2,
-        "net_pnl": 30.0
+        "wr": 0.5136897001303781,
+        "pf": 1.0592029102535816,
+        "net_pnl": 434.7409978590895,
+        "trades": 3835,
+        "total_withdrawn": 0.0,
+        "breach": false
+      },
+      "params_used": {
+        "sma_window": 20,
+        "train_score": 0.5021105266575752
+      }
+    },
+    {
+      "train_start": "2021-04-01",
+      "train_end": "2022-03-31",
+      "test_start": "2022-04-02",
+      "test_end": "2022-07-01",
+      "train_metrics": {
+        "wr": 0.5053574907461523,
+        "pf": 0.9969185647922496,
+        "net_pnl": -95.0104691012757,
+        "trades": 15399,
+        "total_withdrawn": 0.0,
+        "breach": false
+      },
+      "test_metrics": {
+        "wr": 0.5113428943937418,
+        "pf": 1.05944407696122,
+        "net_pnl": 450.6472199030486,
+        "trades": 3835,
+        "total_withdrawn": 0.0,
+        "breach": false
+      },
+      "params_used": {
+        "sma_window": 20,
+        "train_score": 0.5053574907461523
+      }
+    },
+    {
+      "train_start": "2021-07-01",
+      "train_end": "2022-06-30",
+      "test_start": "2022-07-02",
+      "test_end": "2022-10-01",
+      "train_metrics": {
+        "wr": 0.5072407299175271,
+        "pf": 1.0181023581895172,
+        "net_pnl": 556.8582355903845,
+        "trades": 15399,
+        "total_withdrawn": 0.0,
+        "breach": false
+      },
+      "test_metrics": {
+        "wr": 0.49674054758800523,
+        "pf": 0.9953520963967184,
+        "net_pnl": -35.64652648593437,
+        "trades": 3835,
+        "total_withdrawn": 0.0,
+        "breach": false
+      },
+      "params_used": {
+        "sma_window": 20,
+        "train_score": 0.5072407299175271
+      }
+    },
+    {
+      "train_start": "2021-10-01",
+      "train_end": "2022-09-30",
+      "test_start": "2022-10-02",
+      "test_end": "2023-01-01",
+      "train_metrics": {
+        "wr": 0.5049029157737516,
+        "pf": 1.012351069646838,
+        "net_pnl": 380.4977769289417,
+        "trades": 15399,
+        "total_withdrawn": 0.0,
+        "breach": false
+      },
+      "test_metrics": {
+        "wr": 0.5069100391134289,
+        "pf": 1.0717400006668674,
+        "net_pnl": 524.9495507290385,
+        "trades": 3835,
+        "total_withdrawn": 0.0,
+        "breach": false
+      },
+      "params_used": {
+        "sma_window": 20,
+        "train_score": 0.5049029157737516
+      }
+    },
+    {
+      "train_start": "2022-01-01",
+      "train_end": "2022-12-31",
+      "test_start": "2023-01-02",
+      "test_end": "2023-04-01",
+      "train_metrics": {
+        "wr": 0.5071707953063885,
+        "pf": 1.0459593380699859,
+        "net_pnl": 1374.6912420052422,
+        "trades": 15340,
+        "total_withdrawn": 0.0,
+        "breach": false
+      },
+      "test_metrics": {
+        "wr": 0.49726205997392436,
+        "pf": 0.9705135325461659,
+        "net_pnl": -225.81767595286237,
+        "trades": 3835,
+        "total_withdrawn": 0.0,
+        "breach": false
+      },
+      "params_used": {
+        "sma_window": 20,
+        "train_score": 0.5071707953063885
+      }
+    },
+    {
+      "train_start": "2022-04-01",
+      "train_end": "2023-03-31",
+      "test_start": "2023-04-02",
+      "test_end": "2023-07-01",
+      "train_metrics": {
+        "wr": 0.5045255150202677,
+        "pf": 1.0290141839709015,
+        "net_pnl": 1025.851901197725,
+        "trades": 18009,
+        "total_withdrawn": 0.0,
+        "breach": false
+      },
+      "test_metrics": {
+        "wr": 0.5110367892976588,
+        "pf": 1.0505867923382655,
+        "net_pnl": 446.98224891271366,
+        "trades": 4485,
+        "total_withdrawn": 0.0,
+        "breach": false
+      },
+      "params_used": {
+        "sma_window": 10,
+        "train_score": 0.5045255150202677
+      }
+    },
+    {
+      "train_start": "2022-07-01",
+      "train_end": "2023-06-30",
+      "test_start": "2023-07-02",
+      "test_end": "2023-10-01",
+      "train_metrics": {
+        "wr": 0.5055250152701427,
+        "pf": 1.0302338781821057,
+        "net_pnl": 1064.6535161503743,
+        "trades": 18009,
+        "total_withdrawn": 0.0,
+        "breach": false
+      },
+      "test_metrics": {
+        "wr": 0.5025641025641026,
+        "pf": 1.0206595707143593,
+        "net_pnl": 184.08071512091283,
+        "trades": 4485,
+        "total_withdrawn": 0.0,
+        "breach": false
+      },
+      "params_used": {
+        "sma_window": 10,
+        "train_score": 0.5055250152701427
+      }
+    },
+    {
+      "train_start": "2022-10-01",
+      "train_end": "2023-09-30",
+      "test_start": "2023-10-02",
+      "test_end": "2024-01-01",
+      "train_metrics": {
+        "wr": 0.507190635451505,
+        "pf": 1.0370196023218166,
+        "net_pnl": 1296.4855909436392,
+        "trades": 17940,
+        "total_withdrawn": 0.0,
+        "breach": false
+      },
+      "test_metrics": {
+        "wr": 0.49956082564778215,
+        "pf": 0.9924122603652882,
+        "net_pnl": -70.49878712674399,
+        "trades": 4554,
+        "total_withdrawn": 0.0,
+        "breach": false
+      },
+      "params_used": {
+        "sma_window": 10,
+        "train_score": 0.507190635451505
+      }
+    },
+    {
+      "train_start": "2023-01-01",
+      "train_end": "2023-12-31",
+      "test_start": "2024-01-02",
+      "test_end": "2024-04-01",
+      "train_metrics": {
+        "wr": 0.5042363433667781,
+        "pf": 1.0172169328681435,
+        "net_pnl": 613.6514378297079,
+        "trades": 17940,
+        "total_withdrawn": 0.0,
+        "breach": false
+      },
+      "test_metrics": {
+        "wr": 0.5068004459308807,
+        "pf": 1.0741865778849933,
+        "net_pnl": 641.2294302354712,
+        "trades": 4485,
+        "total_withdrawn": 0.0,
+        "breach": false
+      },
+      "params_used": {
+        "sma_window": 10,
+        "train_score": 0.5042363433667781
+      }
+    },
+    {
+      "train_start": "2023-04-01",
+      "train_end": "2024-03-31",
+      "test_start": "2024-04-02",
+      "test_end": "2024-07-01",
+      "train_metrics": {
+        "wr": 0.5056133056133056,
+        "pf": 1.0183551387918233,
+        "net_pnl": 703.2493816141096,
+        "trades": 19240,
+        "total_withdrawn": 0.0,
+        "breach": false
+      },
+      "test_metrics": {
+        "wr": 0.504989604989605,
+        "pf": 1.0267725533713696,
+        "net_pnl": 255.30345317265073,
+        "trades": 4810,
+        "total_withdrawn": 0.0,
+        "breach": false
+      },
+      "params_used": {
+        "sma_window": 5,
+        "train_score": 0.5056133056133056
+      }
+    },
+    {
+      "train_start": "2023-07-01",
+      "train_end": "2024-06-30",
+      "test_start": "2024-07-02",
+      "test_end": "2024-10-01",
+      "train_metrics": {
+        "wr": 0.5044178794178794,
+        "pf": 1.015827873182719,
+        "net_pnl": 606.9485860756095,
+        "trades": 19240,
+        "total_withdrawn": 0.0,
+        "breach": false
+      },
+      "test_metrics": {
+        "wr": 0.4954954954954955,
+        "pf": 0.9773990216558778,
+        "net_pnl": -221.60365407294194,
+        "trades": 4884,
+        "total_withdrawn": 0.0,
+        "breach": false
+      },
+      "params_used": {
+        "sma_window": 5,
+        "train_score": 0.5044178794178794
       }
     }
   ],
   "aggregate": {
-    "wr_mean": 0.5529555555555556,
-    "wr_std": 4.969039949998985e-05,
-    "pf_mean": 1.2,
-    "pf_std": 0.0,
-    "net_pnl_mean": 29.555555555555557,
-    "net_pnl_std": 0.49690399499995325,
-    "n_folds": 9,
-    "n_positive_folds": 9
+    "n_folds": 15,
+    "mean_wr": 0.5035403087517126,
+    "std_wr": 0.0055059426513774075,
+    "mean_pf": 1.0152373844296885,
+    "std_pf": 0.03955599227860944,
+    "wd_per_month_mean": 0.0,
+    "wd_per_month_std": 0.0,
+    "breach_rate": 0.0,
+    "n_positive_folds": 9,
+    "n_negative_folds": 6
   }
 }
