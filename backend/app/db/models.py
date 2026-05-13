@@ -332,3 +332,110 @@ class AlertEvent(Base):
         Index("ix_alert_events_symbol_ts", "symbol", "ts"),
         Index("ix_alert_events_rule_ts", "rule_id", "ts"),
     )
+
+
+# ── Rev 3: operational telemetry / ingestion safety net ─────────────────────
+
+
+class PipelineRun(Base):
+    """One row per scheduler tick per symbol — runtime audit log.
+
+    Used by :func:`app.api.endpoints.admin.system_status` to answer
+    "did the last cycle complete cleanly and produce all 25+ metric
+    types?" without re-deriving from raw ``computed_metrics``.
+    """
+
+    __tablename__ = "pipeline_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    symbol: Mapped[str] = mapped_column(Text, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=datetime.utcnow
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    duration_ms: Mapped[float] = mapped_column(
+        Numeric(20, 3), nullable=False, default=0
+    )
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="running")
+    """``running`` | ``ok`` | ``partial`` | ``failed``."""
+    rows_read: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    metric_rows_written: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0
+    )
+    missing_metric_types: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, default=list
+    )
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class DeadLetterEntry(Base):
+    """Records ingestion payloads we could not parse / write.
+
+    Surfaced via /admin/inspector so operators can diagnose feed issues
+    without trawling logs.
+    """
+
+    __tablename__ = "dead_letter_queue"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    ts: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=datetime.utcnow
+    )
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    """``opra_live`` | ``opra_historical`` | ``globex_live`` | ``eod_oi`` | ``pipeline``."""
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+
+class BackfillCheckpoint(Base):
+    """Per (dataset, symbol) bookmark for resumable historical backfills."""
+
+    __tablename__ = "backfill_checkpoints"
+
+    dataset: Mapped[str] = mapped_column(Text, primary_key=True, nullable=False)
+    symbol: Mapped[str] = mapped_column(Text, primary_key=True, nullable=False)
+    last_completed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=datetime.utcnow
+    )
+
+
+class ContractAdv(Base):
+    """Trailing-N-day average daily volume per contract.
+
+    Consumed by :func:`app.processing.flow_events.detect_flow_events` for
+    the UOA branch. Refreshed by a daily post-close job.
+    """
+
+    __tablename__ = "contract_adv"
+
+    symbol: Mapped[str] = mapped_column(Text, primary_key=True, nullable=False)
+    expiration: Mapped[datetime] = mapped_column(
+        Date, primary_key=True, nullable=False
+    )
+    strike: Mapped[float] = mapped_column(
+        Numeric(20, 6), primary_key=True, nullable=False
+    )
+    option_type: Mapped[str] = mapped_column(
+        CHAR(1), primary_key=True, nullable=False
+    )
+
+    avg_daily_volume: Mapped[float] = mapped_column(
+        Numeric(20, 6), nullable=False
+    )
+    window_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=datetime.utcnow
+    )
+
+    __table_args__ = (
+        Index("ix_contract_adv_symbol_expiry", "symbol", "expiration"),
+    )

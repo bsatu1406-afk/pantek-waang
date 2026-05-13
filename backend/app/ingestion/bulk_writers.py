@@ -19,6 +19,7 @@ from typing import Any
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.core.logging import get_logger
 from app.db.models import (
     FlowEvent,
@@ -27,6 +28,7 @@ from app.db.models import (
     OptionsTrade,
 )
 from app.db.session import get_session_factory
+from app.ingestion.dlq import record_dlq
 
 logger = get_logger(__name__)
 
@@ -44,23 +46,51 @@ class BulkUpsertWriter:
         model: Any,
         *,
         conflict_keys: Sequence[str] | None,
-        batch_size: int = 2000,
+        batch_size: int | None = None,
         flush_interval_s: float = 2.0,
         on_conflict: str = "update",
+        max_pending_rows: int | None = None,
+        dlq_source: str = "ingestion",
     ) -> None:
+        settings = get_settings()
         self.model = model
         self.conflict_keys = list(conflict_keys) if conflict_keys else None
-        self._batch_size = batch_size
+        self._batch_size = batch_size or settings.upsert_batch_size
         self._flush_interval_s = flush_interval_s
         self._on_conflict = on_conflict
+        self._max_pending_rows = (
+            max_pending_rows or settings.ingestion_max_pending_rows
+        )
+        self._dlq_source = dlq_source
         self._buffer: list[dict[str, Any]] = []
         self._lock = asyncio.Lock()
         self._last_flush_ts: datetime = datetime.utcnow()
+        self._shed_rows = 0
+
+    @property
+    def pending(self) -> int:
+        return len(self._buffer)
+
+    @property
+    def shed_rows(self) -> int:
+        return self._shed_rows
 
     async def add(self, row: dict[str, Any]) -> None:
         async with self._lock:
-            self._buffer.append(row)
+            if len(self._buffer) >= self._max_pending_rows:
+                self._shed_rows += 1
+                shed = True
+            else:
+                shed = False
+                self._buffer.append(row)
             should_flush = len(self._buffer) >= self._batch_size
+        if shed:
+            await record_dlq(
+                source=self._dlq_source,
+                reason="backpressure_overflow",
+                payload={k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in row.items()},
+            )
+            return
         if should_flush:
             await self.flush()
 
@@ -103,12 +133,17 @@ class BulkUpsertWriter:
         try:
             await session.execute(stmt)
             await session.commit()
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             await session.rollback()
             logger.exception(
                 "bulk_writer_flush_failed",
                 table=self.model.__tablename__,
                 rows=len(batch),
+            )
+            await record_dlq(
+                source=self._dlq_source,
+                reason=f"flush_failed:{self.model.__tablename__}:{type(exc).__name__}",
+                payload={"row_count": len(batch), "error": str(exc)[:500]},
             )
 
     @staticmethod
@@ -151,6 +186,7 @@ def get_futures_tick_writer() -> BulkUpsertWriter:
         _futures_writer = BulkUpsertWriter(
             FuturesTick,
             conflict_keys=("ts", "symbol", "seq"),
+            dlq_source="globex_live",
         )
     return _futures_writer
 
@@ -161,6 +197,7 @@ def get_options_trade_writer() -> BulkUpsertWriter:
         _options_trade_writer = BulkUpsertWriter(
             OptionsTrade,
             conflict_keys=("ts", "symbol", "expiration", "strike", "option_type", "seq"),
+            dlq_source="opra_live",
         )
     return _options_trade_writer
 
@@ -171,6 +208,7 @@ def get_flow_event_writer() -> BulkUpsertWriter:
         _flow_event_writer = BulkUpsertWriter(
             FlowEvent,
             conflict_keys=None,  # event rows are append-only
+            dlq_source="pipeline",
         )
     return _flow_event_writer
 
@@ -181,5 +219,6 @@ def get_liquidity_snapshot_writer() -> BulkUpsertWriter:
         _liquidity_writer = BulkUpsertWriter(
             LiquiditySnapshot,
             conflict_keys=("ts", "symbol"),
+            dlq_source="globex_live",
         )
     return _liquidity_writer

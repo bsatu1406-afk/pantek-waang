@@ -106,6 +106,8 @@ class DatabentoLiveIngester:
         self._state: dict[int, dict[str, Any]] = {}
         self._stop = asyncio.Event()
         self._task: asyncio.Task | None = None
+        self._registry_refresh_task: asyncio.Task | None = None
+        self._last_registry_refresh_at: datetime | None = None
         # Schemas mutated at runtime as the gateway tells us which are unsupported.
         self._schemas: list[str] = list(DEFAULT_SCHEMAS)
         # Telemetry: count records by type since the last log dump.
@@ -129,6 +131,11 @@ class DatabentoLiveIngester:
     def diagnostics(self) -> dict[str, Any]:
         return {
             "registry_size": len(self._registry),
+            "last_registry_refresh_at": (
+                self._last_registry_refresh_at.isoformat()
+                if self._last_registry_refresh_at
+                else None
+            ),
             "schemas_active": list(self._schemas),
             "schemas_dropped": list(self._dropped_schemas),
             "record_counts": dict(self._cumulative_record_counts),
@@ -144,6 +151,8 @@ class DatabentoLiveIngester:
             "system_messages": list(self._system_messages),
             "error_messages": list(self._error_messages),
             "supported_symbols": self._settings.supported_symbols,
+            "writer_pending": self._writer.pending,
+            "writer_shed_rows": self._writer.shed_rows,
         }
 
     # ── Public API ──────────────────────────────────────────────────────────
@@ -151,16 +160,60 @@ class DatabentoLiveIngester:
         if self._task is not None:
             return
         self._task = asyncio.create_task(self._run_with_reconnect(), name="databento_live")
+        self._registry_refresh_task = asyncio.create_task(
+            self._registry_refresh_loop(), name="databento_live_registry_refresh"
+        )
 
     async def stop(self) -> None:
+        """Signal the ingester to stop and wait for graceful shutdown.
+
+        Cancels the main stream task and the registry refresh task, then
+        flushes any pending buffered rows so we don't lose in-flight data.
+        """
         self._stop.set()
-        if self._task is not None:
-            self._task.cancel()
+        tasks = [t for t in (self._task, self._registry_refresh_task) if t is not None]
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
             try:
-                await self._task
+                await task
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
-            self._task = None
+        self._task = None
+        self._registry_refresh_task = None
+        # Final flush so buffered rows are not lost on shutdown.
+        try:
+            await self._writer.flush()
+            await self._trade_writer.flush()
+        except Exception:  # noqa: BLE001
+            logger.exception("live_ingester_shutdown_flush_failed")
+
+    async def _registry_refresh_loop(self) -> None:
+        """Periodically re-bootstrap the contract registry.
+
+        On long-running deployments new strikes appear during the session
+        (especially weekly expiries near the open). A periodic refresh
+        guards against the registry going stale.
+        """
+        interval_s = max(60, self._settings.ingestion_registry_refresh_seconds)
+        while not self._stop.is_set():
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=interval_s)
+                return  # _stop fired, exit cleanly
+            except TimeoutError:
+                pass
+            if self._stop.is_set():
+                return
+            try:
+                logger.info("live_registry_refresh_start")
+                await self._bootstrap_registry()
+                self._last_registry_refresh_at = datetime.now(UTC)
+                logger.info(
+                    "live_registry_refresh_done",
+                    contracts=len(self._registry),
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("live_registry_refresh_failed")
 
     # ── Internals ───────────────────────────────────────────────────────────
     async def _run_with_reconnect(self) -> None:

@@ -48,6 +48,59 @@ class Settings(BaseSettings):
     disable_live_ingestion: bool = Field(default=False, alias="DISABLE_LIVE_INGESTION")
     disable_historical_backfill: bool = Field(default=False, alias="DISABLE_HISTORICAL_BACKFILL")
 
+    # ── Regime / processing thresholds ───────────────────────────────────────
+    # Score threshold (absolute value) below which the regime is reported as
+    # "neutral". Increase to add hysteresis around the zero-crossing and
+    # prevent flickering when GEX_NET_TOTAL is small and noisy.
+    gex_regime_threshold: float = Field(default=0.2, alias="GEX_REGIME_THRESHOLD")
+
+    # ── Flow event detection thresholds (Agent 3) ────────────────────────────
+    flow_sweep_min_premium: float = Field(
+        default=50_000.0, alias="FLOW_SWEEP_MIN_PREMIUM"
+    )
+    """Minimum dollar premium (size × price × 100) for a multi-leg cluster
+    to be flagged as a SWEEP. Sweeps are aggressive multi-venue prints."""
+
+    flow_block_min_size: int = Field(default=100, alias="FLOW_BLOCK_MIN_SIZE")
+    """Minimum single-print size (contracts) to be flagged as a BLOCK."""
+
+    flow_uoa_vol_oi_ratio: float = Field(
+        default=2.0, alias="FLOW_UOA_VOL_OI_RATIO"
+    )
+    """volume/OI ratio threshold for UOA classification when OI is known."""
+
+    # ── Ingestion / DB write tuning (Agent 4 / 6) ────────────────────────────
+    upsert_batch_size: int = Field(default=1000, alias="UPSERT_BATCH_SIZE")
+    """Batch size used by ``BulkUpsertWriter`` / ``OptionsChainWriter``."""
+
+    ingestion_max_pending_rows: int = Field(
+        default=10_000, alias="INGESTION_MAX_PENDING_ROWS"
+    )
+    """Hard cap on rows in any single writer's pending buffer. Past this we
+    log a WARNING and flush synchronously to apply backpressure."""
+
+    ingestion_dlq_max_size: int = Field(
+        default=1000, alias="INGESTION_DLQ_MAX_SIZE"
+    )
+    """Maximum dead-letter queue entries retained per ingester."""
+
+    ingestion_registry_refresh_seconds: int = Field(
+        default=4 * 60 * 60, alias="INGESTION_REGISTRY_REFRESH_SECONDS"
+    )
+    """How often the OPRA live ingester re-bootstraps its instrument registry
+    to pick up new intraday contracts. Default 4 hours during RTH."""
+
+    futures_feed_lag_warn_ms: int = Field(
+        default=5_000, alias="FUTURES_FEED_LAG_WARN_MS"
+    )
+    """Log a WARNING when the freshest futures tick is older than this."""
+
+    # ── Streaming API (Agent 5) ──────────────────────────────────────────────
+    max_ws_connections_per_key: int = Field(
+        default=5, alias="MAX_WS_CONNECTIONS_PER_KEY"
+    )
+    """Cap on simultaneous WebSocket connections per API key."""
+
     # ── Misc ─────────────────────────────────────────────────────────────────
     rate_limit_per_minute: int = Field(default=120, alias="RATE_LIMIT_PER_MINUTE")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
