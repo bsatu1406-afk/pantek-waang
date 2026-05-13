@@ -643,9 +643,12 @@ async def run_pipeline_for_symbol(symbol: str) -> PipelineResult | None:
         )
 
     # ── Agent 5 streaming hook ───────────────────────────────────────────
-    # Best-effort fan-out to any WS / SSE subscribers. Failures here must
-    # never poison the pipeline tick — log and move on.
-    if status == "ok":
+    # Best-effort fan-out to any WS / SSE subscribers. We publish on any
+    # tick that produced metrics (ok or partial) so subscribers continue
+    # receiving frames even when one slow metric type (e.g. PIN_PROBABILITY,
+    # which needs futures data) is missing. Failures here must never
+    # poison the pipeline tick — log and move on.
+    if status in ("ok", "partial") and result is not None:
         try:
             await _publish_streaming_snapshot(symbol)
         except Exception:  # noqa: BLE001
