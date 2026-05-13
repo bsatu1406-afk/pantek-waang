@@ -12,4 +12,8 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
 testpaths = ["tests"]
-addopts = "-q"
+addopts = "-q --strict-markers"
+markers = [
+    "integration: end-to-end tests that require a live Postgres / TimescaleDB",
+    "property: hypothesis-based property tests (may be slow on first run)",
+]

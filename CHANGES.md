@@ -1,3 +1,72 @@
+# Rev 3 — Production Hardening
+
+A 10-agent, four-phase hardening pass that brings the platform from
+"working in dev" to "ready for production traffic". Each agent owns a
+narrow slice of correctness, durability, or operability. The complete
+plan and per-agent prompts are checked in under `docs/` (see
+[Rev 3 plan](docs/rev3_plan.md)) so future deployments can re-run any
+single agent in isolation.
+
+## Highlights
+
+| Agent | Surface area | What landed |
+|-------|--------------|-------------|
+| 1 | `processing/bsm.py`, `processing/iv.py` | Newton-Raphson IV fallback, discounted-intrinsic floor, analytical vega, 64 new correctness tests |
+| 2 | `processing/gex.py`, `vanna_charm.py`, `walls.py`, `max_pain.py`, `regime.py`, `zero_gamma.py` | NaN/inf scrubbing, sign-correctness audit, regime hysteresis via `GEX_REGIME_THRESHOLD` |
+| 3 | `processing/lee_ready.py`, `hiro.py`, `flow_events.py`, `flow_pipeline.py` | Lee-Ready edge cases, HIRO bucket reset, SWEEP / BLOCK / UOA threshold tuning |
+| 4 | `db/migrations/0004_*`, `db/models.py` | `pipeline_runs`, `dead_letter_queue`, `backfill_checkpoints`, `contract_adv` tables + TimescaleDB compression on hot hypertables |
+| 5 | `api/endpoints/snapshot.py`, `stream.py`, `flow.py`, `hiro.py` | `GET /v1/{symbol}/snapshot` (25+ metric types), WebSocket `/stream`, SSE fallback, flow + HIRO history endpoints, in-process notifier |
+| 6 | `ingestion/dlq.py`, `writer.py`, `bulk_writers.py`, `databento_live.py` | Dead-letter queue, backpressure shedding, periodic contract registry refresh, graceful shutdown that final-flushes buffers |
+| 7 | `processing/pipeline.py`, `scheduler.py`, `loader.py` | Atomic `_persist_metrics` transactions, parallel-symbol `asyncio.gather`, loader coverage gate, alert dedup, `pipeline_runs` writes, completeness check |
+| 8 | `api/endpoints/data.py`, `admin.py`, `schemas.py` | GEX `mode={oi,volume}`, max-pain `expiry=` filter, typed request/response schemas, admin telemetry endpoints, strict input validation |
+| 9 | `tests/`, `docs/`, `CHANGES.md`, `README.md` | `@integration` marker, hypothesis property tests, coverage report, API reference, runbooks |
+| 10 | `frontend/src/**` | Live WebSocket dashboard, GEX area chart, HIRO panel, Walls / Max-Pain cards, Flow feed, Regime badge, `recharts` |
+
+## New configuration (env vars, all optional)
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `GEX_REGIME_THRESHOLD` | `0.2` | Deadband for regime score hysteresis (Agent 2). |
+| `FLOW_SWEEP_MIN_PREMIUM` | `50000` | USD premium floor for sweep detection (Agent 3). |
+| `FLOW_BLOCK_MIN_SIZE` | `100` | Contract count floor for block detection (Agent 3). |
+| `FLOW_UOA_VOL_OI_RATIO` | `2.0` | Volume/OI ratio for UOA detection (Agent 3). |
+| `UPSERT_BATCH_SIZE` | `1000` | Default batch size for buffered DB writers (Agent 4). |
+| `INGESTION_MAX_PENDING_ROWS` | `10000` | Per-writer backpressure cap before DLQ shedding (Agent 6). |
+| `INGESTION_DLQ_MAX_SIZE` | `1000` | DLQ in-memory ring-buffer cap (Agent 6). |
+| `INGESTION_REGISTRY_REFRESH_SECONDS` | `14400` | Live-ingester contract registry re-bootstrap interval (Agent 6). |
+| `FUTURES_FEED_LAG_WARN_MS` | `5000` | Warn threshold for stale futures feed (Agent 8). |
+| `MAX_WS_CONNECTIONS_PER_KEY` | `5` | Streaming API per-key connection cap (Agent 5). |
+
+## New DB objects (migration 0004)
+
+* `pipeline_runs` — one row per scheduler tick per symbol with
+  duration, status, `missing_metric_types[]`, error.
+* `dead_letter_queue` — persistent record of unparseable / un-writeable
+  ingestion payloads, surfaced via `/admin/inspector/dlq`.
+* `backfill_checkpoints` — `(dataset, symbol) → last_completed_at`
+  bookmark so historical backfills resume after restart.
+* `contract_adv` — trailing-N-day ADV per contract for UOA detection.
+
+Plus additive indexes on `computed_metrics`, `options_chain`, and
+`flow_events`, and TimescaleDB **compression policies** on
+`options_chain` / `options_trades` / `futures_ticks` /
+`computed_metrics` (compress chunks older than 1 day; segment by
+symbol). Migration 0004 is fully additive — migrations 0001–0003 are
+untouched.
+
+## Backwards compatibility
+
+* All existing API routes keep their current names and response
+  envelopes. New endpoints are additive.
+* The `mode={oi,volume}` parameter on `/v1/{symbol}/gex` and the
+  `expiry=` filter on `/v1/{symbol}/max-pain` are optional with
+  unchanged defaults.
+* Database compression and chunk-interval changes are no-ops on the
+  test fixture (plain Postgres without TimescaleDB) — the migration
+  detects the extension via `pg_extension` and skips when absent.
+
+---
+
 # Databento pipeline fixes (rev 2)
 
 ## Rev 2 — what changed (this update)

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from datetime import UTC, datetime, timedelta
+from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
-from sqlalchemy import func, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import authenticate_admin
@@ -17,6 +18,7 @@ from app.api.schemas import (
     ApiKeyCreateResponse,
     ApiKeySummary,
     ApiKeyUpdate,
+    PipelineRunSummary,
     SystemStatus,
 )
 from app.config import get_settings
@@ -27,8 +29,17 @@ from app.core.security import (
     hash_api_key,
     verify_password,
 )
-from app.db.models import ApiKey, ComputedMetric, OptionsChain
+from app.db.models import (
+    ApiKey,
+    ComputedMetric,
+    DeadLetterEntry,
+    FlowEvent,
+    FuturesTick,
+    OptionsChain,
+    PipelineRun,
+)
 from app.db.session import get_db
+from app.ingestion.databento_live import get_live_ingester
 from app.ingestion.writer import get_writer
 from app.processing.scheduler import get_pipeline_state
 
@@ -171,6 +182,14 @@ async def api_key_usage(
 # ── System status ────────────────────────────────────────────────────────────
 
 
+def _lag_ms(ts: datetime | None) -> float | None:
+    if ts is None:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=UTC)
+    return max(0.0, (datetime.now(UTC) - ts).total_seconds() * 1000.0)
+
+
 @router.get("/system/status", response_model=SystemStatus)
 async def system_status(
     _admin: Annotated[str, Depends(authenticate_admin)],
@@ -206,6 +225,65 @@ async def system_status(
         )
     ).scalar_one()
 
+    # ── Rev 3 operational telemetry ─────────────────────────────────────────
+    futures_latest = (
+        await session.execute(select(func.max(FuturesTick.ts)))
+    ).scalar_one_or_none()
+    opra_latest = (
+        await session.execute(select(func.max(OptionsChain.ts)))
+    ).scalar_one_or_none()
+    dlq_pending = int(
+        (
+            await session.execute(
+                select(func.count()).select_from(DeadLetterEntry)
+            )
+        ).scalar_one()
+        or 0
+    )
+    cutoff_1h = datetime.now(UTC) - timedelta(hours=1)
+    flow_events_last_hour = int(
+        (
+            await session.execute(
+                select(func.count())
+                .select_from(FlowEvent)
+                .where(FlowEvent.ts > cutoff_1h)
+            )
+        ).scalar_one()
+        or 0
+    )
+
+    # Last pipeline run per symbol.
+    last_runs: list[PipelineRunSummary] = []
+    for sym in settings.supported_symbols:
+        row = (
+            await session.execute(
+                select(PipelineRun)
+                .where(PipelineRun.symbol == sym)
+                .order_by(desc(PipelineRun.started_at))
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            continue
+        last_runs.append(
+            PipelineRunSummary(
+                symbol=row.symbol,
+                started_at=row.started_at,
+                finished_at=row.finished_at,
+                duration_ms=float(row.duration_ms or 0.0),
+                status=row.status or "unknown",
+                rows_read=int(row.rows_read or 0),
+                metric_rows_written=int(row.metric_rows_written or 0),
+                missing_metric_types=list(row.missing_metric_types or []),
+                error=row.error,
+            )
+        )
+
+    try:
+        live_diag: dict[str, Any] = get_live_ingester().diagnostics()
+    except Exception as exc:  # noqa: BLE001
+        live_diag = {"error": str(exc)}
+
     return SystemStatus(
         pipeline_running=bool(state.last_run),
         last_databento_event=writer.last_event_ts,
@@ -219,4 +297,10 @@ async def system_status(
         rows_per_symbol=rows_per_symbol,
         metric_rows_per_symbol=metric_rows_per_symbol,
         active_api_keys=int(active_keys or 0),
+        futures_lag_ms=_lag_ms(futures_latest),
+        opra_lag_ms=_lag_ms(opra_latest),
+        dlq_pending=dlq_pending,
+        flow_events_last_hour=flow_events_last_hour,
+        last_pipeline_runs=last_runs,
+        live_ingester=live_diag,
     )

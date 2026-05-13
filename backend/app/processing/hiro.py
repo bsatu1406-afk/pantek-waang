@@ -1,29 +1,42 @@
 """HIRO — Hedging Impact Reaction-Oriented signed-premium tape.
 
-Concept:
+Concept
+-------
 * Every option trade is classified as buyer-initiated or seller-initiated
-  by ``classify_lee_ready``.
-* Each classified trade is converted into a *dealer signed premium*::
+  by :func:`app.processing.lee_ready.classify_lee_ready`.
+* Each classified trade is converted into a *hedge-flow signed premium*::
 
-      premium_$ = side · size · price · 100
+      premium_$ = customer_side · size · price · 100 · option_sign
 
-  where ``side`` is the **dealer's** sign (opposite to the customer's):
-  if the customer bought (side = +1), the dealer sold and is now short
-  the option, so the dealer's premium delta is **−** size·price·100.
+  where ``option_sign`` is ``+1`` for calls and ``-1`` for puts.
 
-* HIRO is the running cumulative sum of dealer signed premium, broken
-  out by call vs put because the hedge implications are different:
-  dealer-short calls hedges by *buying* the underlying (positive flow);
-  dealer-short puts hedges by *selling* the underlying (negative flow).
+  The sign captures what the dealer must do to hedge in the underlying:
 
-* Net HIRO ≈ cumulative dealer hedging force on the underlying::
+  * Customer **buys** a **call** → dealer is short the call (negative
+    delta) → dealer hedges by **buying** the underlying → **positive**
+    hedge flow.
+  * Customer **buys** a **put** → dealer is short the put (positive
+    delta) → dealer hedges by **selling** the underlying → **negative**
+    hedge flow.
+  * The mirror holds for customer sells. The net effect is that customer
+    bullish flow (long calls / short puts) yields **positive** HIRO and
+    customer bearish flow (long puts / short calls) yields **negative**
+    HIRO — directly interpretable as cumulative dealer-hedging buy
+    pressure on the underlying.
 
-      HIRO = HIRO_call_buy_pressure − HIRO_put_sell_pressure
+Bucketing
+---------
+The output is broken into time buckets at the resample frequency
+specified by ``bucket`` (default ``1min``). **The ``cumulative`` field on
+each bucket row resets at the start of every bucket** — it represents
+the running signed premium *within* the bucket, not a session-wide
+cumsum. Consumers that want a session-wide running total can ``cumsum``
+the per-bucket ``net_premium`` themselves; storing per-bucket cumulative
+keeps each bucket independently meaningful and avoids carry-over from
+stale data when the window slides forward.
 
-This module is pure / vectorised and stateless. Caller supplies a
-DataFrame of classified option trades; we return aggregated time-bucketed
-signed-premium series suitable for storing in ``computed_metrics`` or
-streaming to the website.
+``HiroSeries.cumulative`` reports the most-recent bucket's signed
+premium (i.e. the last bucket's ``net_premium``).
 """
 
 from __future__ import annotations
@@ -45,10 +58,10 @@ class HiroSeries:
 
     series: list[dict] = field(default_factory=list)
     """One entry per time bucket: ``ts``, ``call_premium``, ``put_premium``,
-    ``net_premium``, ``cumulative``."""
+    ``net_premium``, ``cumulative`` (resets at the start of each bucket)."""
 
     cumulative: float = 0.0
-    """Last value of the running net cumulative dealer signed premium."""
+    """Signed premium of the most-recent bucket (per-bucket reset)."""
 
 
 def compute_hiro(
@@ -66,7 +79,7 @@ def compute_hiro(
     * ``price``       — trade price (per contract).
     * ``option_type`` — 'C' or 'P'.
 
-    The dealer-side sign is the negation of customer ``side``.
+    See the module docstring for the sign convention.
     """
     expected = {"ts", "side", "size", "price", "option_type"}
     if df.empty:
@@ -86,21 +99,24 @@ def compute_hiro(
         return HiroSeries(bucket_size=bucket)
 
     customer_side = pd.to_numeric(work["side"], errors="coerce").fillna(0).astype(int)
-    dealer_side = -customer_side
     size = pd.to_numeric(work["size"], errors="coerce").fillna(0)
     price = pd.to_numeric(work["price"], errors="coerce").fillna(0)
     is_call = work["option_type"].astype(str).str.upper() == "C"
 
-    premium = dealer_side * size * price * CONTRACT_MULTIPLIER
-    call_prem = np.where(is_call, premium, 0.0)
-    put_prem = np.where(~is_call, premium, 0.0)
+    base_premium = customer_side * size * price * CONTRACT_MULTIPLIER
+    # Calls: +customer_side (customer-buy-call → +). Puts: -customer_side.
+    call_prem = np.where(is_call, base_premium, 0.0)
+    put_prem = np.where(~is_call, -base_premium, 0.0)
 
     work = work.assign(_call=call_prem, _put=put_prem)
     work = work.set_index("ts")
 
     grouped = work.resample(bucket).agg({"_call": "sum", "_put": "sum"})
     grouped["net"] = grouped["_call"] + grouped["_put"]
-    grouped["cumulative"] = grouped["net"].cumsum()
+    # ``cumulative`` resets at the start of each bucket. Since the
+    # resample collapses all intra-bucket trades into a single row, the
+    # bucket's running cumulative simply equals its net signed premium.
+    grouped["cumulative"] = grouped["net"]
 
     series_payload = [
         {
