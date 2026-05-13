@@ -9,6 +9,8 @@ data/processed/
 reports/*.csv
 reports/*.json
 !reports/.gitkeep
+!reports/walk_forward_example.json
+!reports/walk_forward_example.md
 *.egg-info/
 .coverage
 htmlcov/
