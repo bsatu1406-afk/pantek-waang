@@ -24,9 +24,11 @@ import pandas as pd
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 
+from app.config import get_settings
 from app.core.logging import get_logger
 from app.db.models import (
     ComputedMetric,
+    ContractAdv,
     FuturesTick,
     OptionsChain,
     OptionsTrade,
@@ -68,9 +70,17 @@ async def run_flow_pipeline(
                                                           start=window_start,
                                                           end=now)
         chain_underlying = await _load_chain_underlying(session, symbol=symbol)
+        contract_adv = await _load_contract_adv(session, symbol=symbol)
+        contract_oi = await _load_contract_oi(session, symbol=symbol)
 
     # ── Flow events ──────────────────────────────────────────────────────
-    events = detect_flow_events(opt_trades, config=FlowEventConfig())
+    cfg = FlowEventConfig.from_settings(get_settings())
+    events = detect_flow_events(
+        opt_trades,
+        contract_adv=contract_adv,
+        contract_oi=contract_oi,
+        config=cfg,
+    )
     if events:
         writer = get_flow_event_writer()
         rows = [
@@ -249,6 +259,66 @@ async def _load_futures_trades(session, *, symbols: Sequence[str], start, end):
             except (TypeError, ValueError):
                 continue
     return df, last
+
+
+async def _load_contract_adv(session, *, symbol: str) -> pd.DataFrame | None:
+    """Fetch the trailing-ADV table for a single symbol.
+
+    Returned columns: ``symbol``, ``expiration``, ``strike``,
+    ``option_type``, ``avg_daily_volume`` — the exact shape expected by
+    :func:`detect_flow_events`. ``None`` if no rows are available, which
+    triggers the OI / absolute fallbacks downstream.
+    """
+    stmt = (
+        select(
+            ContractAdv.symbol,
+            ContractAdv.expiration,
+            ContractAdv.strike,
+            ContractAdv.option_type,
+            ContractAdv.avg_daily_volume,
+        )
+        .where(ContractAdv.symbol == symbol)
+    )
+    res = await session.execute(stmt)
+    rows = res.mappings().all()
+    if not rows:
+        return None
+    df = pd.DataFrame([dict(r) for r in rows])
+    df["strike"] = pd.to_numeric(df["strike"], errors="coerce")
+    df["avg_daily_volume"] = pd.to_numeric(df["avg_daily_volume"], errors="coerce")
+    return df
+
+
+async def _load_contract_oi(session, *, symbol: str) -> pd.DataFrame | None:
+    """Fetch the most-recent open-interest snapshot per contract.
+
+    Used as a secondary UOA fallback when no trailing-ADV row exists for
+    a contract.
+    """
+    stmt = (
+        select(
+            OptionsChain.symbol,
+            OptionsChain.expiration,
+            OptionsChain.strike,
+            OptionsChain.option_type,
+            OptionsChain.oi,
+        )
+        .where(OptionsChain.symbol == symbol)
+        .where(OptionsChain.oi.is_not(None))
+        .order_by(OptionsChain.ts.desc())
+    )
+    res = await session.execute(stmt)
+    rows = res.mappings().all()
+    if not rows:
+        return None
+    df = pd.DataFrame([dict(r) for r in rows])
+    df = df.drop_duplicates(
+        subset=["symbol", "expiration", "strike", "option_type"], keep="first"
+    )
+    df = df.rename(columns={"oi": "open_interest"})
+    df["strike"] = pd.to_numeric(df["strike"], errors="coerce")
+    df["open_interest"] = pd.to_numeric(df["open_interest"], errors="coerce")
+    return df
 
 
 async def _load_chain_underlying(session, *, symbol: str) -> float | None:
