@@ -23,6 +23,7 @@ from app.api.schemas import DataEnvelope
 from app.config import get_settings
 from app.db.models import FlowEvent
 from app.db.session import get_db
+from app.processing.session import session_snapshot
 
 router = APIRouter()
 
@@ -199,6 +200,55 @@ async def build_snapshot_payload(session: AsyncSession, symbol: str) -> tuple[di
     hiro_rows = await _latest_metrics(session, sym, "HIRO")
     hiro_cumulative = float(hiro_rows[0].value or 0.0) if hiro_rows else 0.0
 
+    # Rev 4 — 0DTE/back-month cohort splits.
+    gex_0dte_oi_rows = await _latest_metrics(session, sym, "GEX_0DTE_NET_TOTAL")
+    gex_0dte_vol_rows = await _latest_metrics(session, sym, "GEX_0DTE_NET_TOTAL_VOL")
+    gex_back_oi_rows = await _latest_metrics(session, sym, "GEX_BACK_NET_TOTAL")
+    gex_back_vol_rows = await _latest_metrics(session, sym, "GEX_BACK_NET_TOTAL_VOL")
+    charm_0dte_rows = await _latest_metrics(session, sym, "CHARM_0DTE_NET_TOTAL")
+    charm_decay_rows = await _latest_metrics(session, sym, "CHARM_0DTE_DECAY_RATE")
+    flip_rows = await _latest_metrics(session, sym, "GEX_0DTE_FLIP_SPEED")
+
+    def _gex_summary(rows: list) -> dict[str, Any]:
+        if not rows:
+            return {
+                "net_total": 0.0,
+                "curve": [],
+                "top_positive": [],
+                "top_negative": [],
+                "zero_gamma": None,
+                "reason": "no_0dte_today",
+            }
+        r = rows[0]
+        payload = dict(r.extra_json or {})
+        payload["net_total"] = float(r.value or 0)
+        return payload
+
+    zero_dte_payload = {
+        "gex_oi": _gex_summary(gex_0dte_oi_rows),
+        "gex_volume": _gex_summary(gex_0dte_vol_rows),
+        "charm_total": _gex_summary(charm_0dte_rows),
+        "charm_decay_rate": (
+            float(charm_decay_rows[0].value or 0.0) if charm_decay_rows else 0.0
+        ),
+        "flip_speed": float(flip_rows[0].value or 0.0) if flip_rows else 0.0,
+    }
+    back_month_payload = {
+        "gex_oi": _gex_summary(gex_back_oi_rows),
+        "gex_volume": _gex_summary(gex_back_vol_rows),
+    }
+
+    # Rev 4 — session_state block (RTH gate + 0DTE tau snapshot).
+    session_state = session_snapshot(symbol=sym)
+
+    # Rev 4 — spot resolution block (futures_basis | parity | stale_cache).
+    spot_rows = await _latest_metrics(session, sym, "SPOT")
+    spot_payload: dict[str, Any] | None = None
+    if spot_rows:
+        r = spot_rows[0]
+        spot_payload = dict(r.extra_json or {})
+        spot_payload.setdefault("price", float(r.value or 0.0))
+
     # Flow events in the last hour (count only — series lives at /flow).
     since = datetime.now(UTC) - timedelta(hours=1)
     flow_count_q = select(func.count(FlowEvent.id)).where(
@@ -229,6 +279,11 @@ async def build_snapshot_payload(session: AsyncSession, symbol: str) -> tuple[di
         "iv_term_structure": iv_term_structure,
         "hiro_cumulative": hiro_cumulative,
         "flow_events_last_hour": flow_events_last_hour,
+        # Rev 4 additions.
+        "session_state": session_state,
+        "spot": spot_payload,
+        "zero_dte": zero_dte_payload,
+        "back_month": back_month_payload,
     }
 
     all_rows = (
@@ -237,6 +292,11 @@ async def build_snapshot_payload(session: AsyncSession, symbol: str) -> tuple[di
         + vanna_total_rows + charm_total_rows + vanna_level_rows + charm_level_rows
         + regime_oi_rows + regime_vol_rows
         + pin_rows + move_rows + term_rows + rr_rows + hiro_rows
+        # Rev 4 metric rows
+        + gex_0dte_oi_rows + gex_0dte_vol_rows
+        + gex_back_oi_rows + gex_back_vol_rows
+        + charm_0dte_rows + charm_decay_rows + flip_rows
+        + spot_rows
     )
     candidates = [r.ts for r in all_rows if r.ts is not None]
     for ts_candidate in (walls_oi.get("computed_at"), walls_volume.get("computed_at")):
@@ -273,4 +333,60 @@ async def get_snapshot(
     if sym not in [s.upper() for s in get_settings().supported_symbols]:
         raise HTTPException(status_code=404, detail=f"Unsupported symbol {sym}")
     payload, computed_at = await build_snapshot_payload(session, sym)
+    return _envelope(symbol, computed_at, payload)
+
+
+@router.get("/v1/{symbol}/0dte", response_model=DataEnvelope)
+@limiter.limit(lambda: f"{get_settings().rate_limit_per_minute}/minute")
+async def get_zero_dte(
+    request: Request,  # noqa: ARG001
+    symbol: str = Path(..., min_length=1, max_length=20, pattern=_SYMBOL_PATTERN),
+    session: AsyncSession = Depends(get_db),
+    _api_key=Depends(require_symbol_access()),
+) -> DataEnvelope:
+    """Rev 4 — thin envelope around the 0DTE + back-month cohorts.
+
+    Returns the same data the snapshot would, but filtered down to the
+    Rev 4 0DTE-first fields so the 0DTE-focused page can fetch a
+    smaller payload. ``session_state`` is included so the front-end can
+    show the RTH banner without a second roundtrip.
+    """
+    sym = symbol.upper()
+    if sym not in [s.upper() for s in get_settings().supported_symbols]:
+        raise HTTPException(status_code=404, detail=f"Unsupported symbol {sym}")
+    full, computed_at = await build_snapshot_payload(session, sym)
+    # Curate the response — only the 0DTE-relevant blocks.
+    payload: dict[str, Any] = {
+        "session_state": full.get("session_state"),
+        "spot": full.get("spot"),
+        "zero_dte": full.get("zero_dte"),
+        "back_month": full.get("back_month"),
+        "pin_probability": full.get("pin_probability"),
+        "move_tracker": full.get("move_tracker"),
+    }
+    return _envelope(symbol, computed_at, payload)
+
+
+@router.get("/v1/{symbol}/spot", response_model=DataEnvelope)
+@limiter.limit(lambda: f"{get_settings().rate_limit_per_minute}/minute")
+async def get_spot(
+    request: Request,  # noqa: ARG001
+    symbol: str = Path(..., min_length=1, max_length=20, pattern=_SYMBOL_PATTERN),
+    session: AsyncSession = Depends(get_db),
+    _api_key=Depends(require_symbol_access()),
+) -> DataEnvelope:
+    """Rev 4 — standalone spot resolution endpoint.
+
+    Useful for the dashboard's spot-source badge and for downstream
+    consumers that only need the current spot price plus its
+    provenance (``futures_basis`` / ``parity`` / ``stale_cache``).
+    """
+    sym = symbol.upper()
+    if sym not in [s.upper() for s in get_settings().supported_symbols]:
+        raise HTTPException(status_code=404, detail=f"Unsupported symbol {sym}")
+    full, computed_at = await build_snapshot_payload(session, sym)
+    payload: dict[str, Any] = {
+        "session_state": full.get("session_state"),
+        "spot": full.get("spot"),
+    }
     return _envelope(symbol, computed_at, payload)

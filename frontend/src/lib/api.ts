@@ -115,6 +115,66 @@ export const ApiKeys = {
   },
 };
 
+// ── Databento key pool (Rev 4) ────────────────────────────────────────────
+
+export type DatabentoDataset = "OPRA.PILLAR" | "GLBX.MDP3" | "BOTH";
+
+export interface DatabentoKeySummary {
+  id: number;
+  label: string;
+  dataset: DatabentoDataset;
+  api_key_prefix: string;
+  priority: number;
+  is_active: boolean;
+  last_used_at: string | null;
+  last_error_at: string | null;
+  last_error_msg: string | null;
+  error_count: number;
+  created_at: string;
+}
+
+export interface DatabentoKeyCreatePayload {
+  label: string;
+  dataset: DatabentoDataset;
+  api_key: string;
+  priority?: number;
+  is_active?: boolean;
+}
+
+export interface DatabentoKeyTestResult {
+  ok: boolean;
+  message: string;
+}
+
+export const DatabentoKeys = {
+  async list(): Promise<DatabentoKeySummary[]> {
+    const resp = await api.get("/admin/databento-keys");
+    return resp.data;
+  },
+  async create(payload: DatabentoKeyCreatePayload): Promise<DatabentoKeySummary> {
+    const resp = await api.post("/admin/databento-keys", payload);
+    return resp.data;
+  },
+  async update(
+    id: number,
+    payload: Partial<{
+      label: string;
+      priority: number;
+      is_active: boolean;
+    }>,
+  ): Promise<DatabentoKeySummary> {
+    const resp = await api.patch(`/admin/databento-keys/${id}`, payload);
+    return resp.data;
+  },
+  async remove(id: number): Promise<void> {
+    await api.delete(`/admin/databento-keys/${id}`);
+  },
+  async test(id: number): Promise<DatabentoKeyTestResult> {
+    const resp = await api.post(`/admin/databento-keys/${id}/test`);
+    return resp.data;
+  },
+};
+
 export const Status = {
   async health(): Promise<HealthResponse> {
     const resp = await api.get("/health");

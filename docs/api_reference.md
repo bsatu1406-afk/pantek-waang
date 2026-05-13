@@ -124,6 +124,30 @@ Server-Sent Events fallback for clients (browsers behind corporate
 proxies that strip the `Upgrade` header) that cannot connect via
 WebSocket. Same payload as `/stream`.
 
+### `GET /v1/{symbol}/0dte` *(Rev 4)*
+
+Curated 0DTE-focused envelope. Returns:
+
+```json
+{
+  "session_state": { "is_rth": true, "tau_0dte_years": 0.0008, "minutes_to_close": 27.0, "is_expiration_day": true },
+  "spot":          { "price": 5234.10, "source": "futures_basis", "basis": -0.7, "futures_price": 5234.80 },
+  "zero_dte":      { "gex_oi": {...}, "gex_volume": {...}, "charm_total": {...}, "charm_decay_rate": 0.012, "flip_speed": 4.2e5 },
+  "back_month":    { "gex_oi": {...}, "gex_volume": {...} },
+  "pin_probability": [...], "move_tracker": {...}
+}
+```
+
+Use this when the consumer only needs the 0DTE blocks; saves the
+larger `/snapshot` payload.
+
+### `GET /v1/{symbol}/spot` *(Rev 4)*
+
+Lightweight spot-resolution endpoint. Same `spot` block as
+`/snapshot`, with the resolution provenance: `futures_basis`,
+`parity`, or `stale_cache`. `session_state` is included so the
+client can render an RTH banner without a second roundtrip.
+
 ## Administrative endpoints (`Authorization: Bearer <jwt>`)
 
 * `POST /admin/login` — exchange username/password for a JWT.
@@ -133,6 +157,15 @@ WebSocket. Same payload as `/stream`.
 * `GET  /admin/inspector` — feed-level diagnostics from the ingesters.
 * `GET  /admin/inspector/dlq` — paginated dead-letter queue. *Rev 3.*
 * CRUD on `/admin/api-keys`, `/admin/alert-rules`.
+* CRUD on `/admin/databento-keys` (*Rev 4*) — failover pool of
+  encrypted Databento API keys per dataset
+  (`OPRA.PILLAR` | `GLBX.MDP3` | `BOTH`). Plaintext keys are
+  encrypted with Fernet (HKDF-SHA256 of `JWT_SECRET`) before
+  storage; the listing only returns the first ~8 characters of
+  the key for identification.
+  * `POST /admin/databento-keys/{id}/test` — decryption sanity check
+    (does not contact Databento; ingester records auth errors on
+    next connect attempt).
 
 ## Errors
 

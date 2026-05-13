@@ -118,6 +118,9 @@ EXPECTED_METRIC_TYPES: frozenset[str] = frozenset(
         "CHARM_0DTE_LEVEL",
         "CHARM_0DTE_DECAY_RATE",
         "GEX_0DTE_FLIP_SPEED",
+        # Spot resolution snapshot — value=price, extra_json carries
+        # source/futures/basis diagnostics.
+        "SPOT",
     }
 )
 
@@ -627,6 +630,22 @@ async def _persist_metrics(
                         "extra_json": level,
                     }
                 )
+
+    # ── Rev 4: persist spot resolution result so /v1/{symbol}/spot can
+    # serve the most recent reading without re-running the resolver.
+    if result.spot is not None:
+        rows.append(
+            {
+                "ts": ts,
+                "symbol": symbol,
+                "metric_type": "SPOT",
+                "strike": 0,
+                "expiration": sentinel_expiry,
+                "computed_at": ts,
+                "value": float(result.spot.price),
+                "extra_json": spot_result_to_payload(result.spot),
+            }
+        )
 
     if not rows:
         return 0

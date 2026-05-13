@@ -4,6 +4,7 @@ import { useAuth } from "./lib/AuthContext";
 import { ApiKeysPage } from "./pages/ApiKeys";
 import { DashboardPage } from "./pages/Dashboard";
 import { DataInspectorPage } from "./pages/DataInspector";
+import { DatabentoKeysPage } from "./pages/DatabentoKeys";
 import { LivePage } from "./pages/Live";
 import { LoginPage } from "./pages/Login";
 import { SystemStatusPage } from "./pages/SystemStatus";
@@ -47,6 +48,14 @@ export function App() {
         element={
           <ProtectedRoute>
             <DataInspectorPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/databento-keys"
+        element={
+          <ProtectedRoute>
+            <DatabentoKeysPage />
           </ProtectedRoute>
         }
       />

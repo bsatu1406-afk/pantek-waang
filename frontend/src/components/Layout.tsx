@@ -1,4 +1,13 @@
-import { Activity, Database, KeyRound, LayoutDashboard, LogOut, Radio, ServerCog } from "lucide-react";
+import {
+  Activity,
+  Database,
+  KeyRound,
+  LayoutDashboard,
+  LogOut,
+  Radio,
+  Server,
+  ServerCog,
+} from "lucide-react";
 import { type ReactNode } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "@/lib/AuthContext";
@@ -9,6 +18,7 @@ const NAV = [
   { to: "/live", label: "Live", icon: Radio },
   { to: "/data-inspector", label: "Data Inspector", icon: Database },
   { to: "/api-keys", label: "API Keys", icon: KeyRound },
+  { to: "/databento-keys", label: "Databento Keys", icon: Server },
   { to: "/system-status", label: "System Status", icon: ServerCog },
 ];
 

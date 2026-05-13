@@ -1,3 +1,86 @@
+# Rev 4 — 0DTE-first hardening
+
+A nine-agent extension on top of Rev 3 that re-centres the platform
+around the **0DTE cohort** (which carries most of the gamma-flow
+intraday) and adds the operational glue needed to keep SPX / NDX live
+streams resilient: an RTH session lifecycle, futures-adjusted spot,
+0DTE / back-month split analytics, an EMA basis tracker, and an
+encrypted Databento API-key failover pool.
+
+## Highlights
+
+| Agent | Surface area | What landed |
+|-------|--------------|-------------|
+| 1 | `processing/session.py`, `scheduler.py`, `pipeline.py` | RTH gate (09:30–16:15 ET, NYSE holiday-aware), `time_to_expiry_0dte_years`, `session_snapshot` block on `/snapshot`, cron jobs 09:29 ET (reset caches) + 16:16 ET (finalize) |
+| 2 | `processing/spot.py`, `pipeline.py` | `SpotResult{price, source, futures_price, basis, parity_price, parity_deviation_pct}` — futures-basis first, parity fallback, 5-minute stale-cache final resort, EMA-smoothed basis (α=0.1) |
+| 3 | `processing/zero_dte.py`, `pipeline.py` | `split_by_expiry()`, `compute_zero_dte_summary()`, `compute_back_month_summary()`, charm-decay rate across ATM 0DTE, Δ-net-GEX / Δt **flip speed** |
+| 6 | `db/migrations/0005_*`, `db/models.py` | `session_events`, `metric_type_registry` (33 metrics), `databento_api_keys`, Rev 4 columns on `pipeline_runs`, partial 0DTE index on `computed_metrics` |
+| 7 | `api/endpoints/snapshot.py`, `schemas.py` | `GET /v1/{symbol}/0dte`, `GET /v1/{symbol}/spot`, snapshot envelope now carries `session_state` + `spot` + `zero_dte` + `back_month` |
+| 9 | `core/crypto.py`, `ingestion/key_pool.py`, `api/endpoints/admin.py` | Encrypted Databento key pool: Fernet (HKDF-SHA256 of `JWT_SECRET`), env-first priority resolution, 5-error cooldown, admin CRUD + test endpoint |
+| 5 / 10 | `frontend/src/pages/DatabentoKeys.tsx`, `Live.tsx`, `App.tsx`, `Layout.tsx` | New `/databento-keys` admin page, RTH banner + spot-source badge + 0DTE flip-speed strip on `/live` |
+| 8 | `tests/test_session.py`, `test_spot_resolver.py`, `test_zero_dte.py`, `test_key_pool.py`, `test_crypto.py`, `test_api_admin.py` | +44 unit tests (273→296 baseline) + 2 Postgres-backed CRUD tests for the key pool |
+
+## New schema (migration 0005)
+
+* `session_events` — `(ts, symbol, event_type, extra_json)` audit log of
+  session opens / closes / cache resets.
+* `metric_type_registry` — first-class enum of every metric type the
+  pipeline knows how to emit, with a description + `added_in_rev`.
+* `databento_api_keys` — `(label, dataset, api_key_encrypted,
+  api_key_prefix, priority, is_active, error_count, …)`. Ciphertext
+  is **Fernet** with the key derived from `JWT_SECRET`.
+* `pipeline_runs` gains `is_expiration_day`, `spot_source`, `spot_price`,
+  `tau_0dte_years` for ex-post tick reconstruction.
+* Partial index `ix_computed_metrics_0dte_today` on `(symbol, ts DESC)`
+  for the 0DTE metric types.
+
+## New endpoints (Rev 4)
+
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| `GET` | `/v1/{symbol}/0dte` | API key | Curated envelope of `session_state`, `spot`, `zero_dte`, `back_month`, `pin_probability`, `move_tracker` for the 0DTE-focused page |
+| `GET` | `/v1/{symbol}/spot` | API key | Standalone spot resolution (futures-basis / parity / stale-cache) |
+| `GET` | `/admin/databento-keys` | Admin JWT | List the failover pool |
+| `POST` | `/admin/databento-keys` | Admin JWT | Register a new key (encrypted before storage) |
+| `PATCH` | `/admin/databento-keys/{id}` | Admin JWT | Toggle `is_active` / re-prioritize / rename |
+| `DELETE` | `/admin/databento-keys/{id}` | Admin JWT | Remove from pool |
+| `POST` | `/admin/databento-keys/{id}/test` | Admin JWT | Decryption sanity check |
+
+The `/v1/{symbol}/snapshot` envelope also now includes the Rev 4
+fields, so existing consumers gain them automatically.
+
+## New metric types (registered in `metric_type_registry`)
+
+| Metric type | What it captures |
+|-------------|------------------|
+| `GEX_0DTE_NET_TOTAL` / `_VOL` | OI-weighted (and volume-weighted) net GEX restricted to today-expiring rows |
+| `GEX_0DTE_LEVEL` / `_LEVEL_VOL` | Per-strike GEX curve for the 0DTE cohort |
+| `GEX_BACK_NET_TOTAL` / `_VOL` / `_LEVEL` / `_LEVEL_VOL` | Same shapes for the back-month cohort |
+| `CHARM_0DTE_NET_TOTAL` / `_LEVEL` | Charm aggregates for the 0DTE cohort |
+| `CHARM_0DTE_DECAY_RATE` | Mean \|∂Δ/∂τ\| across ATM 0DTE rows expressed per hour |
+| `GEX_0DTE_FLIP_SPEED` | \|net_gex_now − net_gex_prev\| / Δt (USD/sec) |
+| `SPOT` | Current spot price with `extra_json` carrying the resolution provenance |
+
+All 0DTE-specific metrics are persisted **even on non-0DTE days** with
+`value=0.0` and `extra_json={"reason": "no_0dte_today"}` so backfills
+have a consistent dense series.
+
+## Operator notes
+
+* Live ingestion now falls over between API keys automatically. The
+  admin UI at `/databento-keys` lets operators register 1–5 backup keys
+  per dataset (`OPRA.PILLAR`, `GLBX.MDP3`, or `BOTH`) ordered by
+  priority ASC. Env-configured `DATABENTO_API_KEY_OPRA` /
+  `DATABENTO_API_KEY_GLOBEX` are always tried first.
+* Encryption key for the pool is derived from `JWT_SECRET` via
+  HKDF-SHA256. Rotating `JWT_SECRET` invalidates all stored keys —
+  re-register them via the admin UI after rotation.
+* The RTH gate suppresses pipeline ticks outside 09:30–16:15 ET. To
+  test off-hours, monkeypatch `app.processing.session.is_rth_now` to
+  return `True` (see `tests/test_pipeline_hardening.py`).
+
+---
+
 # Rev 3 — Production Hardening
 
 A 10-agent, four-phase hardening pass that brings the platform from
