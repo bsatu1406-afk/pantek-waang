@@ -28,9 +28,12 @@ from app.config import get_settings
 from app.core.logging import get_logger
 from app.ingestion.bulk_writers import (
     BulkUpsertWriter,
+    get_bbo_writer,
     get_options_trade_writer,
 )
 from app.ingestion.writer import OptionsChainWriter, get_writer
+from app.processing.bbo_cache import InMemoryBboCache
+from app.processing.lee_ready import TickRuleState, quote_or_tick_rule
 
 logger = get_logger(__name__)
 
@@ -57,7 +60,10 @@ DATASET = "OPRA.PILLAR"
 PARENT_SUFFIX = ".OPT"
 MAX_RECONNECTS = 5
 INITIAL_BACKOFF_S = 2.0
-DEFAULT_SCHEMAS = ("definition", "trades", "statistics", "cmbp-1")
+# Rev 4: ``bbo-1s`` is included for the persisted ``bbo_book`` table so
+# Lee-Ready can be re-run accurately over historical windows. cmbp-1 is
+# still the primary live BBO source for online classification.
+DEFAULT_SCHEMAS = ("definition", "trades", "statistics", "cmbp-1", "bbo-1s")
 
 
 def _parent(symbol: str) -> str:
@@ -96,14 +102,19 @@ class DatabentoLiveIngester:
         writer: OptionsChainWriter | None = None,
         *,
         trade_writer: BulkUpsertWriter | None = None,
+        bbo_writer: BulkUpsertWriter | None = None,
     ) -> None:
         self._settings = get_settings()
         self._writer = writer or get_writer()
         self._trade_writer = trade_writer or get_options_trade_writer()
+        self._bbo_writer = bbo_writer or get_bbo_writer()
         # instrument_id -> {symbol, expiration, strike, option_type}
         self._registry: dict[int, dict[str, Any]] = {}
         # instrument_id -> latest oi / volume / underlying_price etc.
         self._state: dict[int, dict[str, Any]] = {}
+        # Rev 4: in-memory BBO cache + tick-rule fallback state for Lee-Ready.
+        self._bbo_cache = InMemoryBboCache()
+        self._tick_rule_state = TickRuleState()
         self._stop = asyncio.Event()
         self._task: asyncio.Task | None = None
         self._registry_refresh_task: asyncio.Task | None = None
@@ -185,6 +196,7 @@ class DatabentoLiveIngester:
         try:
             await self._writer.flush()
             await self._trade_writer.flush()
+            await self._bbo_writer.flush()
         except Exception:  # noqa: BLE001
             logger.exception("live_ingester_shutdown_flush_failed")
 
@@ -420,6 +432,11 @@ class DatabentoLiveIngester:
 
         if "Definition" in rtype:
             await self._handle_definition(record)
+        elif "BBO" in rtype or "Bbo" in rtype:
+            # Rev 4: bbo-1s sampled top-of-book. Handled separately from
+            # cmbp-1 so the persisted ``bbo_book`` row uses the correct
+            # source label.
+            await self._handle_bbo(record)
         elif "CMBP" in rtype or "Cmbp" in rtype or "Consolidated" in rtype:
             await self._handle_cmbp(record)
         elif "MBP" in rtype or "Mbp" in rtype:
@@ -508,7 +525,7 @@ class DatabentoLiveIngester:
         except (TypeError, ValueError):
             return
         contract = self._registry[instrument_id]
-        state = self._state.get(instrument_id, {})
+        ts = self._record_ts(record)
 
         seq = getattr(record, "sequence", None) or getattr(record, "ts_event", 0)
         try:
@@ -516,27 +533,35 @@ class DatabentoLiveIngester:
         except (TypeError, ValueError):
             seq_int = 0
 
-        # Quote-rule classifier inline (kept simple — full Lee-Ready with
-        # tick fallback runs in the pipeline against the persisted rows).
-        bid = state.get("bid")
-        ask = state.get("ask")
-        side: int | None = None
-        if bid is not None and ask is not None and bid > 0 and ask > 0:
-            mid = (bid + ask) / 2.0
-            if price > mid:
-                side = 1
-            elif price < mid:
-                side = -1
-            else:
-                side = 0
+        # Rev 4: prefer the dedicated BBO cache (cmbp-1 + bbo-1s) over the
+        # generic state dict — the cache enforces a freshness window and
+        # tracks per-instrument BBO timestamps so we don't end up using
+        # stale quotes from before a reconnect. If the cache miss, fall
+        # back to ``state`` (so legacy mbp-1 paths keep working), and
+        # ultimately apply the tick rule when no quote is available.
+        cache_hit = self._bbo_cache.at(instrument_id, ts)
+        if cache_hit is not None:
+            bid, ask, _age = cache_hit
+        else:
+            state = self._state.get(instrument_id, {})
+            bid = state.get("bid")
+            ask = state.get("ask")
+
+        side = quote_or_tick_rule(
+            price=price,
+            bid=bid,
+            ask=ask,
+            tick_state=self._tick_rule_state,
+            instrument_id=instrument_id,
+        )
 
         signed_premium: float | None = None
-        if side is not None and side != 0:
+        if side != 0:
             # Dealer side is the opposite of customer.
             signed_premium = -side * size_int * price * 100.0
 
         await self._trade_writer.add({
-            "ts": self._record_ts(record),
+            "ts": ts,
             "symbol": contract["symbol"],
             "expiration": contract["expiration"],
             "strike": contract["strike"],
@@ -645,6 +670,8 @@ class DatabentoLiveIngester:
         levels = getattr(record, "levels", None)
         bid: float | None = None
         ask: float | None = None
+        bid_sz: int | None = None
+        ask_sz: int | None = None
         if levels:
             try:
                 top = levels[0]
@@ -653,6 +680,14 @@ class DatabentoLiveIngester:
             if top is not None:
                 bid = _scale_price(getattr(top, "bid_px", None))
                 ask = _scale_price(getattr(top, "ask_px", None))
+                try:
+                    bid_sz = int(getattr(top, "bid_sz", None) or 0) or None
+                except (TypeError, ValueError):
+                    bid_sz = None
+                try:
+                    ask_sz = int(getattr(top, "ask_sz", None) or 0) or None
+                except (TypeError, ValueError):
+                    ask_sz = None
 
         # Fallback to legacy flat fields just in case the SDK normalises
         # differently in the future.
@@ -667,7 +702,104 @@ class DatabentoLiveIngester:
         if ask is not None:
             state["ask"] = ask
 
+        ts = self._record_ts(record)
+        # Rev 4: feed the in-memory cache used by Lee-Ready and persist
+        # the snapshot for historical re-runs. cmbp-1 fires far more
+        # often than bbo-1s; persistence is best-effort and ignores
+        # errors so a slow DB never starves the live stream.
+        self._bbo_cache.update(instrument_id, ts, bid, ask)
+        await self._persist_bbo(
+            instrument_id, ts, contract, bid, ask, bid_sz, ask_sz, source="cmbp-1"
+        )
+
         await self._emit_row(instrument_id, record)
+
+    async def _handle_bbo(self, record: Any) -> None:
+        """OPRA ``bbo-1s`` — 1 Hz sampled top of book (Rev 4).
+
+        Schema fields mirror ``cmbp-1`` at the top level: ``bid_px`` /
+        ``ask_px`` / ``bid_sz`` / ``ask_sz`` either on the record or on
+        ``levels[0]`` depending on SDK version. Top-of-book updates go
+        into ``self._bbo_cache`` (used by Lee-Ready on the next trade)
+        and the persisted ``bbo_book`` table.
+        """
+        instrument_id = getattr(record, "instrument_id", None)
+        contract = self._registry.get(instrument_id) if instrument_id else None
+        if contract is None:
+            return
+
+        bid: float | None = None
+        ask: float | None = None
+        bid_sz: int | None = None
+        ask_sz: int | None = None
+        levels = getattr(record, "levels", None)
+        if levels:
+            try:
+                top = levels[0]
+            except (IndexError, TypeError):
+                top = None
+            if top is not None:
+                bid = _scale_price(getattr(top, "bid_px", None))
+                ask = _scale_price(getattr(top, "ask_px", None))
+                try:
+                    bid_sz = int(getattr(top, "bid_sz", None) or 0) or None
+                except (TypeError, ValueError):
+                    bid_sz = None
+                try:
+                    ask_sz = int(getattr(top, "ask_sz", None) or 0) or None
+                except (TypeError, ValueError):
+                    ask_sz = None
+        if bid is None:
+            bid = _scale_price(getattr(record, "bid_px", None))
+        if ask is None:
+            ask = _scale_price(getattr(record, "ask_px", None))
+
+        state = self._state.setdefault(instrument_id, {})
+        if bid is not None:
+            state["bid"] = bid
+        if ask is not None:
+            state["ask"] = ask
+
+        ts = self._record_ts(record)
+        self._bbo_cache.update(instrument_id, ts, bid, ask)
+        await self._persist_bbo(
+            instrument_id, ts, contract, bid, ask, bid_sz, ask_sz, source="bbo-1s"
+        )
+
+    async def _persist_bbo(
+        self,
+        instrument_id: int,
+        ts: datetime,
+        contract: dict[str, Any],
+        bid: float | None,
+        ask: float | None,
+        bid_sz: int | None,
+        ask_sz: int | None,
+        *,
+        source: str,
+    ) -> None:
+        """Buffer one row to the ``bbo_book`` hypertable.
+
+        Drops rows with both legs missing — those carry no analytical
+        signal and only waste write bandwidth.
+        """
+        if bid is None and ask is None:
+            return
+        await self._bbo_writer.add(
+            {
+                "ts": ts,
+                "symbol": contract["symbol"],
+                "instrument_id": int(instrument_id),
+                "expiration": contract.get("expiration"),
+                "strike": contract.get("strike"),
+                "option_type": contract.get("option_type"),
+                "bid_px": bid,
+                "bid_sz": bid_sz,
+                "ask_px": ask,
+                "ask_sz": ask_sz,
+                "source": source,
+            }
+        )
 
     async def _handle_statistics(self, record: Any) -> None:
         instrument_id = getattr(record, "instrument_id", None)

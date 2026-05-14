@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.core.logging import get_logger
 from app.db.models import (
+    BboBook,
     FlowEvent,
     FuturesTick,
     LiquiditySnapshot,
@@ -178,6 +179,7 @@ _futures_writer: BulkUpsertWriter | None = None
 _options_trade_writer: BulkUpsertWriter | None = None
 _flow_event_writer: BulkUpsertWriter | None = None
 _liquidity_writer: BulkUpsertWriter | None = None
+_bbo_writer: BulkUpsertWriter | None = None
 
 
 def get_futures_tick_writer() -> BulkUpsertWriter:
@@ -222,3 +224,21 @@ def get_liquidity_snapshot_writer() -> BulkUpsertWriter:
             dlq_source="globex_live",
         )
     return _liquidity_writer
+
+
+def get_bbo_writer() -> BulkUpsertWriter:
+    """Lazy singleton for the ``bbo_book`` hypertable (*Rev 4*).
+
+    The cmbp-1 / bbo-1s subscriptions feed this writer with snapshot
+    rows; the Lee-Ready pipeline reads them back via
+    :func:`app.processing.bbo_cache.enrich_with_bbo` when re-running
+    over a historical window.
+    """
+    global _bbo_writer
+    if _bbo_writer is None:
+        _bbo_writer = BulkUpsertWriter(
+            BboBook,
+            conflict_keys=("ts", "symbol", "instrument_id"),
+            dlq_source="opra_live",
+        )
+    return _bbo_writer

@@ -34,6 +34,39 @@ function LiveDashboardInner() {
   }, []);
 
   const data = snapshot?.data;
+  // Rev 4 fields aren't typed in lib/streamClient yet — accessed via a
+  // narrow shape projection here so the existing typed props on
+  // {GexChart, HiroPanel, WallsCards, FlowFeed, RegimeBadge} keep working.
+  const revFour = (snapshot?.data ?? {}) as {
+    session_state?: {
+      is_rth: boolean;
+      session_open: string | null;
+      session_close: string | null;
+      minutes_to_close: number | null;
+      tau_0dte_years: number | null;
+      is_expiration_day: boolean;
+      symbol?: string;
+    };
+    spot?: {
+      price: number;
+      source: string;
+      futures_price?: number | null;
+      basis?: number | null;
+      basis_age_seconds?: number | null;
+      parity_deviation_pct?: number | null;
+    };
+    zero_dte?: {
+      gex_oi?: { net_total: number };
+      gex_volume?: { net_total: number };
+      charm_total?: { net_total: number };
+      charm_decay_rate?: number;
+      flip_speed?: number;
+    };
+  };
+
+  const sess = revFour.session_state;
+  const spot = revFour.spot;
+  const zdte = revFour.zero_dte;
 
   return (
     <div className="space-y-6">
@@ -42,6 +75,11 @@ function LiveDashboardInner() {
           <div className="flex items-center gap-3">
             <h1 className="text-2xl font-semibold tracking-tight">Live</h1>
             <RegimeBadge regime={data?.regime} />
+            {sess?.is_expiration_day && (
+              <span className="rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-xs font-semibold text-amber-500">
+                0DTE day
+              </span>
+            )}
           </div>
           <p className="text-sm text-muted-foreground">
             Streaming snapshot for <span className="font-mono">{symbol || "—"}</span>
@@ -54,6 +92,54 @@ function LiveDashboardInner() {
           </p>
         </div>
         <ConnectionStatusIndicator status={status} lastFrameAt={lastFrameAt} />
+      </div>
+
+      {/* Rev 4 — RTH session banner + spot-source badge + flip speed */}
+      <div className="grid gap-3 md:grid-cols-3">
+        <div
+          className={`rounded-md border p-3 ${
+            sess?.is_rth
+              ? "border-emerald-500/40 bg-emerald-500/10"
+              : "border-border bg-muted/40"
+          }`}
+        >
+          <div className="text-xs uppercase text-muted-foreground">Session</div>
+          <div className="text-sm font-semibold">
+            {sess?.is_rth ? "RTH open" : sess ? "After hours" : "—"}
+          </div>
+          {sess?.minutes_to_close !== null && sess?.minutes_to_close !== undefined && sess.is_rth && (
+            <div className="text-xs text-muted-foreground">
+              {Math.max(0, Math.round(sess.minutes_to_close))} min to close
+            </div>
+          )}
+        </div>
+
+        <div className="rounded-md border border-border p-3">
+          <div className="text-xs uppercase text-muted-foreground">Spot</div>
+          <div className="text-sm font-semibold">
+            {spot ? spot.price.toFixed(2) : "—"}
+          </div>
+          {spot && (
+            <div className="text-xs text-muted-foreground">
+              source: <span className="font-mono">{spot.source}</span>
+              {spot.basis !== null && spot.basis !== undefined && (
+                <> · basis {spot.basis.toFixed(2)}</>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="rounded-md border border-border p-3">
+          <div className="text-xs uppercase text-muted-foreground">0DTE flip speed</div>
+          <div className="text-sm font-semibold">
+            {zdte?.flip_speed !== undefined ? zdte.flip_speed.toFixed(2) : "—"}
+          </div>
+          {zdte?.charm_decay_rate !== undefined && (
+            <div className="text-xs text-muted-foreground">
+              charm decay {zdte.charm_decay_rate.toFixed(4)} /hr
+            </div>
+          )}
+        </div>
       </div>
 
       <div className="rounded-md border border-border bg-background/40 p-3">

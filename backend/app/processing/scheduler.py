@@ -25,7 +25,12 @@ from app.core.logging import get_logger
 from app.ingestion.databento_eod_oi import run_eod_oi_ingestion
 from app.processing.alert_pipeline import run_alert_pipeline
 from app.processing.flow_pipeline import run_flow_pipeline
-from app.processing.pipeline import run_pipeline_for_symbol
+from app.processing.pipeline import (
+    finalize_session,
+    reset_session_state,
+    run_pipeline_for_symbol,
+)
+from app.processing.session import is_rth_now
 
 logger = get_logger(__name__)
 
@@ -54,6 +59,38 @@ _state = PipelineRunState()
 
 def get_pipeline_state() -> PipelineRunState:
     return _state
+
+
+def _parse_hhmm(value: str, default: tuple[int, int]) -> tuple[int, int]:
+    """Parse ``HH:MM`` from settings, returning ``default`` on error."""
+    try:
+        hh, mm = value.split(":", 1)
+        return int(hh), int(mm)
+    except Exception:  # noqa: BLE001
+        return default
+
+
+async def _on_session_open() -> None:
+    """Pre-open hook (09:29 ET weekdays).
+
+    Zero out per-session caches across every supported symbol so the
+    first tick of the new session starts clean. Wrapped in try/except —
+    a failure here must not stall the scheduler thread.
+    """
+    settings = get_settings()
+    try:
+        await reset_session_state(list(settings.supported_symbols))
+    except Exception:  # noqa: BLE001
+        logger.exception("session_open_failed")
+
+
+async def _on_session_close() -> None:
+    """Post-close hook (16:16 ET weekdays)."""
+    settings = get_settings()
+    try:
+        await finalize_session(list(settings.supported_symbols))
+    except Exception:  # noqa: BLE001
+        logger.exception("session_close_failed")
 
 
 async def _run_symbol_pipeline(symbol: str) -> None:
@@ -86,6 +123,12 @@ async def _run_symbol_pipeline(symbol: str) -> None:
 async def _run_all_symbols(concurrency: int = DEFAULT_SYMBOL_CONCURRENCY) -> None:
     """Fan out the per-symbol pipeline across the supported universe.
 
+    Rev 4: gated on :func:`is_rth_now`. Outside RTH the chain pipeline
+    (and its dependent flow / alert pipelines) are no-ops — the cash
+    options don't trade so any computation would just churn the EMA basis
+    cache with stale data. The futures ingester still runs because GLBX
+    trades almost 24x6 and we keep the basis fresh against the ES print.
+
     Uses ``asyncio.gather(..., return_exceptions=True)`` plus a bounded
     semaphore so a slow / failing symbol does not block the others. Any
     exception that escapes :func:`_run_symbol_pipeline` (which itself is
@@ -95,6 +138,9 @@ async def _run_all_symbols(concurrency: int = DEFAULT_SYMBOL_CONCURRENCY) -> Non
     settings = get_settings()
     symbols = settings.supported_symbols
     if not symbols:
+        return
+    if not is_rth_now():
+        logger.debug("pipeline.skip", reason="outside_rth")
         return
 
     sem = asyncio.Semaphore(max(1, int(concurrency)))
@@ -147,6 +193,46 @@ def start_scheduler() -> AsyncIOScheduler:
         id="eod_oi_startup",
         max_instances=1,
     )
+
+    # ── Rev 4: session lifecycle ─────────────────────────────────────────
+    # Cron jobs that fire one minute before / after the RTH window so the
+    # rest of the system has a single, well-defined moment to flush
+    # intraday accumulators. APScheduler's day_of_week='mon-fri' filter
+    # keeps the job off weekends; the :func:`is_rth_now` gate inside the
+    # pipeline still protects against holiday firings.
+    open_hh, open_mm = _parse_hhmm(settings.rth_open_time, (9, 30))
+    close_hh, close_mm = _parse_hhmm(settings.rth_close_time, (16, 15))
+    # Fire 1 minute before open / 1 minute after close.
+    pre_open_mm = (open_mm - 1) % 60
+    pre_open_hh = open_hh - (1 if open_mm == 0 else 0)
+    post_close_mm = (close_mm + 1) % 60
+    post_close_hh = close_hh + (1 if close_mm == 59 else 0)
+
+    scheduler.add_job(
+        _on_session_open,
+        CronTrigger(
+            day_of_week="mon-fri",
+            hour=pre_open_hh,
+            minute=pre_open_mm,
+            timezone="America/New_York",
+        ),
+        id="session_open",
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        _on_session_close,
+        CronTrigger(
+            day_of_week="mon-fri",
+            hour=post_close_hh,
+            minute=post_close_mm,
+            timezone="America/New_York",
+        ),
+        id="session_close",
+        max_instances=1,
+        coalesce=True,
+    )
+
     scheduler.start()
     logger.info("scheduler_started", interval_seconds=settings.compute_interval_seconds)
     return scheduler

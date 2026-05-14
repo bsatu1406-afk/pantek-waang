@@ -31,7 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.core.logging import get_logger
-from app.db.models import ComputedMetric, PipelineRun
+from app.db.models import ComputedMetric, PipelineRun, SessionEvent
 from app.db.session import get_session_factory
 from app.processing.gex import GexSummary, compute_gex
 from app.processing.iv import IVSummary, compute_iv_summary, fill_missing_iv
@@ -40,9 +40,27 @@ from app.processing.max_pain import MaxPainSummary, compute_max_pain
 from app.processing.move_tracker import MoveSnapshot, compute_move_tracker
 from app.processing.pin_probability import compute_pin_probability
 from app.processing.regime import RegimeSummary, compute_regime
+from app.processing.session import (
+    is_expiration_day,
+    is_rth_now,
+    session_snapshot,
+    time_to_expiry_0dte_years,
+)
+from app.processing.spot import (
+    SpotResult,
+    reset_basis_cache,
+    resolve_spot,
+    spot_result_to_payload,
+)
 from app.processing.term_structure import compute_term_structure
 from app.processing.vanna_charm import GreekSummary, compute_charm, compute_vanna
 from app.processing.walls import WallsSummary, compute_walls
+from app.processing.zero_dte import (
+    BackMonthSummary,
+    ZeroDteSummary,
+    compute_back_month_summary,
+    compute_zero_dte_summary,
+)
 
 logger = get_logger(__name__)
 
@@ -85,6 +103,24 @@ EXPECTED_METRIC_TYPES: frozenset[str] = frozenset(
         "RISK_REVERSAL_25D",
         "MOVE_TRACKER",
         "PIN_PROBABILITY",
+        # Rev 4 — 0DTE + back-month split. These rows are always written;
+        # on non-0DTE days every 0DTE row has value=0 and an explanatory
+        # ``extra_json.reason`` so subscribers don't see gaps.
+        "GEX_0DTE_NET_TOTAL",
+        "GEX_0DTE_LEVEL",
+        "GEX_0DTE_NET_TOTAL_VOL",
+        "GEX_0DTE_LEVEL_VOL",
+        "GEX_BACK_NET_TOTAL",
+        "GEX_BACK_LEVEL",
+        "GEX_BACK_NET_TOTAL_VOL",
+        "GEX_BACK_LEVEL_VOL",
+        "CHARM_0DTE_NET_TOTAL",
+        "CHARM_0DTE_LEVEL",
+        "CHARM_0DTE_DECAY_RATE",
+        "GEX_0DTE_FLIP_SPEED",
+        # Spot resolution snapshot — value=price, extra_json carries
+        # source/futures/basis diagnostics.
+        "SPOT",
     }
 )
 
@@ -93,6 +129,20 @@ EXPECTED_METRIC_TYPES: frozenset[str] = frozenset(
 # want to compute when the feed is at least partially healthy, but flag
 # obviously-broken snapshots before they emit a fleet of zero metrics.
 MIN_COVERAGE_FRACTION: float = 0.30
+
+
+# ── Rev 4: flip-speed cache (symbol → (prev_net_gex_0dte, prev_ts_seconds)) ─
+# Module-level so the next tick can compute Δ/Δt. Reset in
+# :func:`reset_session_state` so flip-speed doesn't carry overnight noise.
+_flip_speed_cache: dict[str, tuple[float, float]] = {}
+
+
+def reset_flip_speed_cache(symbol: str | None = None) -> None:
+    """Drop cached previous-tick GEX (used at session open + in tests)."""
+    if symbol is None:
+        _flip_speed_cache.clear()
+    else:
+        _flip_speed_cache.pop(symbol.upper(), None)
 
 
 @dataclass
@@ -112,6 +162,10 @@ class PipelineResult:
     term_structure: list[dict]
     move_tracker: MoveSnapshot
     pin_probability: list[dict]
+    spot: SpotResult | None = None
+    session_state: dict[str, object] | None = None
+    zero_dte: ZeroDteSummary | None = None
+    back_month: BackMonthSummary | None = None
 
 
 def _coverage_ok(df: pd.DataFrame) -> tuple[bool, dict[str, float]]:
@@ -434,6 +488,165 @@ async def _persist_metrics(
             }
         )
 
+    # ── Rev 4: 0DTE-specific + back-month split ──────────────────────────
+    # Always written, even on non-0DTE days, with value=0 and an
+    # explanatory ``extra_json.reason``. This keeps the completeness
+    # check happy and lets the UI distinguish "no 0DTE today" from
+    # "computation failed".
+    if result.zero_dte is not None:
+        zdte = result.zero_dte
+        reason = None if zdte.has_0dte else "no_0dte_today"
+        # Net totals (always one row, even when has_0dte=False).
+        for summary, total_type, level_type in (
+            (zdte.gex_oi, "GEX_0DTE_NET_TOTAL", "GEX_0DTE_LEVEL"),
+            (zdte.gex_vol, "GEX_0DTE_NET_TOTAL_VOL", "GEX_0DTE_LEVEL_VOL"),
+        ):
+            rows.append(
+                {
+                    "ts": ts,
+                    "symbol": symbol,
+                    "metric_type": total_type,
+                    "strike": 0,
+                    "expiration": sentinel_expiry,
+                    "computed_at": ts,
+                    "value": summary.net_total,
+                    "extra_json": {
+                        "underlying_price": summary.underlying_price,
+                        "curve": summary.curve,
+                        "top_positive": summary.top_positive,
+                        "top_negative": summary.top_negative,
+                        "zero_gamma": summary.zero_gamma,
+                        "tau_years": zdte.tau_years,
+                        "reason": reason,
+                    },
+                }
+            )
+            for level in summary.curve:
+                rows.append(
+                    {
+                        "ts": ts,
+                        "symbol": symbol,
+                        "metric_type": level_type,
+                        "strike": level["strike"],
+                        "expiration": sentinel_expiry,
+                        "computed_at": ts,
+                        "value": level.get("net_gex", 0.0),
+                        "extra_json": level,
+                    }
+                )
+
+        # Charm rows (0DTE cohort only).
+        rows.append(
+            {
+                "ts": ts,
+                "symbol": symbol,
+                "metric_type": "CHARM_0DTE_NET_TOTAL",
+                "strike": 0,
+                "expiration": sentinel_expiry,
+                "computed_at": ts,
+                "value": zdte.charm.net_total,
+                "extra_json": {
+                    "underlying_price": zdte.charm.underlying_price,
+                    "curve": zdte.charm.curve,
+                    "tau_years": zdte.tau_years,
+                    "reason": reason,
+                },
+            }
+        )
+        for level in zdte.charm.curve:
+            rows.append(
+                {
+                    "ts": ts,
+                    "symbol": symbol,
+                    "metric_type": "CHARM_0DTE_LEVEL",
+                    "strike": level["strike"],
+                    "expiration": sentinel_expiry,
+                    "computed_at": ts,
+                    "value": level.get("charm_exposure", 0.0),
+                    "extra_json": level,
+                }
+            )
+
+        # Scalars: decay rate + flip speed.
+        rows.append(
+            {
+                "ts": ts,
+                "symbol": symbol,
+                "metric_type": "CHARM_0DTE_DECAY_RATE",
+                "strike": 0,
+                "expiration": sentinel_expiry,
+                "computed_at": ts,
+                "value": zdte.charm_decay_rate,
+                "extra_json": {"reason": reason, "tau_years": zdte.tau_years},
+            }
+        )
+        rows.append(
+            {
+                "ts": ts,
+                "symbol": symbol,
+                "metric_type": "GEX_0DTE_FLIP_SPEED",
+                "strike": 0,
+                "expiration": sentinel_expiry,
+                "computed_at": ts,
+                "value": zdte.flip_speed,
+                "extra_json": {"reason": reason},
+            }
+        )
+
+    if result.back_month is not None:
+        bm = result.back_month
+        for summary, total_type, level_type in (
+            (bm.gex_oi, "GEX_BACK_NET_TOTAL", "GEX_BACK_LEVEL"),
+            (bm.gex_vol, "GEX_BACK_NET_TOTAL_VOL", "GEX_BACK_LEVEL_VOL"),
+        ):
+            rows.append(
+                {
+                    "ts": ts,
+                    "symbol": symbol,
+                    "metric_type": total_type,
+                    "strike": 0,
+                    "expiration": sentinel_expiry,
+                    "computed_at": ts,
+                    "value": summary.net_total,
+                    "extra_json": {
+                        "underlying_price": summary.underlying_price,
+                        "curve": summary.curve,
+                        "top_positive": summary.top_positive,
+                        "top_negative": summary.top_negative,
+                        "zero_gamma": summary.zero_gamma,
+                    },
+                }
+            )
+            for level in summary.curve:
+                rows.append(
+                    {
+                        "ts": ts,
+                        "symbol": symbol,
+                        "metric_type": level_type,
+                        "strike": level["strike"],
+                        "expiration": sentinel_expiry,
+                        "computed_at": ts,
+                        "value": level.get("net_gex", 0.0),
+                        "extra_json": level,
+                    }
+                )
+
+    # ── Rev 4: persist spot resolution result so /v1/{symbol}/spot can
+    # serve the most recent reading without re-running the resolver.
+    if result.spot is not None:
+        rows.append(
+            {
+                "ts": ts,
+                "symbol": symbol,
+                "metric_type": "SPOT",
+                "strike": 0,
+                "expiration": sentinel_expiry,
+                "computed_at": ts,
+                "value": float(result.spot.price),
+                "extra_json": spot_result_to_payload(result.spot),
+            }
+        )
+
     if not rows:
         return 0
 
@@ -509,6 +722,10 @@ async def _finalize_pipeline_run(
     metric_rows_written: int,
     missing_metric_types: list[str],
     error: str | None,
+    is_expiration_day: bool = False,
+    spot_source: str | None = None,
+    spot_price: float | None = None,
+    tau_0dte_years: float | None = None,
 ) -> None:
     """Update the previously-inserted ``pipeline_runs`` row with the result."""
     factory = get_session_factory()
@@ -526,6 +743,10 @@ async def _finalize_pipeline_run(
                     metric_rows_written=metric_rows_written,
                     missing_metric_types=missing_metric_types,
                     error=error,
+                    is_expiration_day=is_expiration_day,
+                    spot_source=spot_source,
+                    spot_price=spot_price,
+                    tau_0dte_years=tau_0dte_years,
                 )
             )
             await s.commit()
@@ -564,11 +785,23 @@ async def run_pipeline_for_symbol(symbol: str) -> PipelineResult | None:
     metric_rows_written: int = 0
     missing: list[str] = []
     result: PipelineResult | None = None
+    spot: SpotResult | None = None
+    sess_state = session_snapshot(symbol=symbol)
+    is_exp_today = bool(sess_state.get("is_expiration_day", False))
+    tau_years = float(sess_state.get("time_to_expiry_0dte_years", 0.0))
 
     try:
         async with factory() as session:
             df = await load_latest_snapshot(session, symbol)
+            # ── Rev 4: resolve spot via futures-first chain BEFORE metrics.
+            #     The result overrides ``underlying_price`` on every row so
+            #     every Greek computation downstream sees the same S.
+            spot = await resolve_spot(symbol, df, session)
         rows_read = int(len(df))
+
+        if spot is not None and not df.empty:
+            df = df.copy()
+            df["underlying_price"] = float(spot.price)
 
         if df.empty:
             logger.info("pipeline_no_data", symbol=symbol)
@@ -594,6 +827,8 @@ async def run_pipeline_for_symbol(symbol: str) -> PipelineResult | None:
                 missing = sorted(EXPECTED_METRIC_TYPES)
             else:
                 result = _compute_metrics(df=df, symbol=symbol, ts=ts, settings=settings)
+                result.spot = spot
+                result.session_state = sess_state
 
                 async with factory() as session:
                     metric_rows_written = await _persist_metrics(
@@ -628,6 +863,10 @@ async def run_pipeline_for_symbol(symbol: str) -> PipelineResult | None:
         metric_rows_written=metric_rows_written,
         missing_metric_types=missing,
         error=error_msg,
+        is_expiration_day=is_exp_today,
+        spot_source=spot.source if spot is not None else None,
+        spot_price=float(spot.price) if spot is not None else None,
+        tau_0dte_years=tau_years,
     )
 
     if result is not None:
@@ -730,6 +969,27 @@ def _compute_metrics(
     )
     move_tracker = compute_move_tracker(df, open_price=None)
 
+    # Rev 4 — 0DTE / back-month split. Pull the prior tick's 0DTE net GEX
+    # from the symbol-local cache so we can derive flip speed Δ/Δt.
+    prev = _flip_speed_cache.get(symbol)
+    now_ts_seconds = ts.timestamp()
+    prev_net_gex = prev[0] if prev is not None else None
+    prev_ts_seconds = prev[1] if prev is not None else None
+
+    zero_dte = compute_zero_dte_summary(
+        df,
+        risk_free_rate=settings.risk_free_rate,
+        atm_band_pct=getattr(settings, "atm_band_pct_0dte", 0.005),
+        prev_net_gex=prev_net_gex,
+        prev_ts_seconds=prev_ts_seconds,
+        now_ts_seconds=now_ts_seconds,
+    )
+    back_month = compute_back_month_summary(
+        df, risk_free_rate=settings.risk_free_rate
+    )
+    # Update flip-speed cache with this tick's OI-weighted 0DTE net GEX.
+    _flip_speed_cache[symbol] = (zero_dte.gex_oi.net_total, now_ts_seconds)
+
     return PipelineResult(
         symbol=symbol,
         ts=ts,
@@ -746,4 +1006,138 @@ def _compute_metrics(
         term_structure=term_structure,
         move_tracker=move_tracker,
         pin_probability=pin_probability,
+        zero_dte=zero_dte,
+        back_month=back_month,
     )
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Rev 4 — session lifecycle hooks
+# ────────────────────────────────────────────────────────────────────────────
+
+
+async def _record_session_event(
+    *,
+    event_type: str,
+    symbol: str | None,
+    extra: dict[str, object] | None = None,
+) -> None:
+    """Insert a row into ``session_events`` so the admin/inspector knows
+    when the scheduler last opened / closed / reset state."""
+    factory = get_session_factory()
+    async with factory() as s:
+        try:
+            s.add(
+                SessionEvent(
+                    event_type=event_type,
+                    symbol=symbol,
+                    extra_json=extra or {},
+                )
+            )
+            await s.commit()
+        except Exception:
+            await s.rollback()
+            logger.exception(
+                "session_event_persist_error",
+                event_type=event_type,
+                symbol=symbol,
+            )
+
+
+async def reset_session_state(symbols: list[str]) -> None:
+    """Wipe per-session caches at 09:29 ET.
+
+    * Clears the futures-basis EMA cache (each new session needs to
+      re-establish basis as the carry / dividend assumption may have
+      changed overnight).
+    * Inserts a ``session_open`` audit row per symbol so the timeline
+      view in /admin/inspector lines up cleanly.
+
+    HIRO accumulators live in :mod:`app.processing.hiro` and reset
+    automatically on the first call of a new session because that
+    module keys its bucket cumulative by trade-date.
+    """
+    logger.info("session.reset", symbols=symbols)
+    for symbol in symbols:
+        reset_basis_cache(symbol)
+        reset_flip_speed_cache(symbol)
+        await _record_session_event(
+            event_type="session_open",
+            symbol=symbol,
+            extra={"reset_basis_cache": True, "reset_flip_speed_cache": True},
+        )
+
+    # Sentinel pipeline_runs row so /admin/system/status can show
+    # "last session opened at HH:MM" without joining session_events.
+    factory = get_session_factory()
+    now = datetime.now(UTC)
+    async with factory() as s:
+        try:
+            for symbol in symbols:
+                s.add(
+                    PipelineRun(
+                        id=uuid.uuid4(),
+                        symbol=symbol,
+                        started_at=now,
+                        finished_at=now,
+                        duration_ms=0,
+                        status="session_open",
+                        is_expiration_day=is_expiration_day(symbol),
+                        tau_0dte_years=time_to_expiry_0dte_years(),
+                    )
+                )
+            await s.commit()
+        except Exception:
+            await s.rollback()
+            logger.exception("session_open_sentinel_persist_error")
+
+
+async def finalize_session(symbols: list[str]) -> None:
+    """End-of-session hook called at 16:16 ET.
+
+    Today this only records the close in ``session_events`` and writes a
+    sentinel ``pipeline_runs`` row. The richer end-of-day HIRO summary
+    is computed by the flow pipeline; this hook is the synchronization
+    point that tells everyone "no more frames after this".
+    """
+    logger.info("session.finalize", symbols=symbols)
+    for symbol in symbols:
+        await _record_session_event(
+            event_type="session_close",
+            symbol=symbol,
+            extra=None,
+        )
+
+    factory = get_session_factory()
+    now = datetime.now(UTC)
+    async with factory() as s:
+        try:
+            for symbol in symbols:
+                s.add(
+                    PipelineRun(
+                        id=uuid.uuid4(),
+                        symbol=symbol,
+                        started_at=now,
+                        finished_at=now,
+                        duration_ms=0,
+                        status="session_close",
+                        is_expiration_day=is_expiration_day(symbol),
+                        tau_0dte_years=0.0,
+                    )
+                )
+            await s.commit()
+        except Exception:
+            await s.rollback()
+            logger.exception("session_close_sentinel_persist_error")
+
+
+__all__ = [
+    "EXPECTED_METRIC_TYPES",
+    "MIN_COVERAGE_FRACTION",
+    "PipelineResult",
+    "finalize_session",
+    "is_rth_now",
+    "reset_session_state",
+    "run_pipeline_for_symbol",
+    "spot_result_to_payload",
+]
