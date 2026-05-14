@@ -36,12 +36,109 @@ to make diagnostics easy from production telemetry.
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import numpy as np
 import pandas as pd
 
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+# ── Single-record tick rule helper (Rev 4) ─────────────────────────────
+
+
+class TickRuleState:
+    """Tracks the last *different* trade price per instrument for the tick
+    rule. Used by the live ingester to classify a trade in O(1) when no
+    BBO is available.
+
+    A separate symbol space per ``instrument_id`` is intentional — the
+    OPRA tape interleaves trades across thousands of contracts and the
+    previous-trade reference must be per-contract.
+    """
+
+    def __init__(self) -> None:
+        self._last: dict[int, float] = {}
+
+    def classify(self, instrument_id: int, price: float) -> int:
+        """Return +1, -1, or 0 for the trade. Updates the state."""
+        if not (isinstance(price, int | float) and np.isfinite(price)):
+            return 0
+        prev = self._last.get(instrument_id)
+        side = 0
+        if prev is not None and price != prev:
+            side = 1 if price > prev else -1
+        if prev is None or price != prev:
+            self._last[instrument_id] = float(price)
+        return side
+
+    def __len__(self) -> int:
+        return len(self._last)
+
+    def clear(self) -> None:
+        self._last.clear()
+
+
+def quote_or_tick_rule(
+    *,
+    price: float,
+    bid: float | None,
+    ask: float | None,
+    tick_state: TickRuleState,
+    instrument_id: int,
+) -> int:
+    """Classify a single trade with the quote rule, falling back to the
+    tick rule when the spread is missing or zero.
+
+    This is the single-record analogue of :func:`classify_lee_ready` and
+    is used by the live ingester. Always updates ``tick_state`` so the
+    fallback path stays usable for subsequent records.
+    """
+    side = 0
+    if bid is not None and ask is not None and bid > 0 and ask > 0 and ask > bid:
+        mid = (bid + ask) / 2.0
+        if price > mid:
+            side = 1
+        elif price < mid:
+            side = -1
+    if side == 0:
+        side = tick_state.classify(instrument_id, price)
+    else:
+        # Still keep the tick-rule reference up to date so subsequent
+        # quote-rule misses fall back cleanly.
+        tick_state.classify(instrument_id, price)
+    return side
+
+
+def classify_lee_ready_with_bbo(
+    trades_df: pd.DataFrame,
+    bbo_df: pd.DataFrame,
+    *,
+    max_age: timedelta = timedelta(seconds=2),
+    contract_keys: tuple[str, ...] = ("symbol", "expiration", "strike", "option_type"),
+) -> pd.DataFrame:
+    """Convenience wrapper: enrich ``trades_df`` with ``bbo_df`` then run
+    the standard Lee-Ready classifier on the merged frame.
+
+    Equivalent to::
+
+        from app.processing.bbo_cache import enrich_with_bbo
+        merged = enrich_with_bbo(trades_df, bbo_df, max_age=max_age, contract_keys=contract_keys)
+        return classify_lee_ready(merged)
+    """
+    # Local import keeps ``bbo_cache`` lazy at module load so it remains
+    # cheap to import :mod:`lee_ready` in unit tests that don't need it.
+    from app.processing.bbo_cache import enrich_with_bbo
+
+    merged = enrich_with_bbo(
+        trades_df,
+        bbo_df,
+        max_age=max_age,
+        contract_keys=contract_keys,
+    )
+    return classify_lee_ready(merged)
 
 
 def classify_lee_ready(

@@ -1,11 +1,12 @@
 # Rev 4 — 0DTE-first hardening
 
-A nine-agent extension on top of Rev 3 that re-centres the platform
+A ten-agent extension on top of Rev 3 that re-centres the platform
 around the **0DTE cohort** (which carries most of the gamma-flow
 intraday) and adds the operational glue needed to keep SPX / NDX live
 streams resilient: an RTH session lifecycle, futures-adjusted spot,
-0DTE / back-month split analytics, an EMA basis tracker, and an
-encrypted Databento API-key failover pool.
+0DTE / back-month split analytics, an EMA basis tracker, an encrypted
+Databento API-key failover pool, and a persisted top-of-book cache so
+Lee-Ready can run accurately over both live and historical windows.
 
 ## Highlights
 
@@ -14,6 +15,7 @@ encrypted Databento API-key failover pool.
 | 1 | `processing/session.py`, `scheduler.py`, `pipeline.py` | RTH gate (09:30–16:15 ET, NYSE holiday-aware), `time_to_expiry_0dte_years`, `session_snapshot` block on `/snapshot`, cron jobs 09:29 ET (reset caches) + 16:16 ET (finalize) |
 | 2 | `processing/spot.py`, `pipeline.py` | `SpotResult{price, source, futures_price, basis, parity_price, parity_deviation_pct}` — futures-basis first, parity fallback, 5-minute stale-cache final resort, EMA-smoothed basis (α=0.1) |
 | 3 | `processing/zero_dte.py`, `pipeline.py` | `split_by_expiry()`, `compute_zero_dte_summary()`, `compute_back_month_summary()`, charm-decay rate across ATM 0DTE, Δ-net-GEX / Δt **flip speed** |
+| 4 | `processing/bbo_cache.py`, `processing/lee_ready.py`, `ingestion/databento_live.py`, `db/migrations/0006_*` | Persisted `bbo_book` hypertable fed by cmbp-1 + bbo-1s, `InMemoryBboCache` for the live path, `TickRuleState` + `quote_or_tick_rule()` single-record API used by the trade dispatcher, `classify_lee_ready_with_bbo()` as-of join helper for backfill |
 | 6 | `db/migrations/0005_*`, `db/models.py` | `session_events`, `metric_type_registry` (33 metrics), `databento_api_keys`, Rev 4 columns on `pipeline_runs`, partial 0DTE index on `computed_metrics` |
 | 7 | `api/endpoints/snapshot.py`, `schemas.py` | `GET /v1/{symbol}/0dte`, `GET /v1/{symbol}/spot`, snapshot envelope now carries `session_state` + `spot` + `zero_dte` + `back_month` |
 | 9 | `core/crypto.py`, `ingestion/key_pool.py`, `api/endpoints/admin.py` | Encrypted Databento key pool: Fernet (HKDF-SHA256 of `JWT_SECRET`), env-first priority resolution, 5-error cooldown, admin CRUD + test endpoint |
@@ -33,6 +35,20 @@ encrypted Databento API-key failover pool.
   `tau_0dte_years` for ex-post tick reconstruction.
 * Partial index `ix_computed_metrics_0dte_today` on `(symbol, ts DESC)`
   for the 0DTE metric types.
+
+## New schema (migration 0006 — Agent 4, bbo-1s Lee-Ready)
+
+* `bbo_book` — TimescaleDB hypertable keyed by `(ts, symbol,
+  instrument_id)`. Optional contract columns (`expiration`, `strike`,
+  `option_type`) and a `source` discriminator (`cmbp-1` | `bbo-1s`) are
+  carried for downstream contract-keyed joins. 7-day retention +
+  compression after 1 day, segment-by `symbol, instrument_id`.
+* Two indexes: `ix_bbo_book_symbol_ts` (per-symbol time scans) and
+  `ix_bbo_book_contract_ts` (point-in-time per-contract lookups).
+
+The migration is additive. Existing trade rows in `options_trades`
+continue to carry their snapshot `bid` / `ask` — the new path is
+purely additive for historical replay and for the in-memory cache.
 
 ## New endpoints (Rev 4)
 

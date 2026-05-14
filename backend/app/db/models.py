@@ -221,6 +221,50 @@ class OptionsTrade(Base):
     )
 
 
+class BboBook(Base):
+    """Persisted BBO snapshots from the OPRA ``bbo-1s`` / ``cmbp-1`` feeds.
+
+    One row per top-of-book update, keyed by ``(ts, symbol, instrument_id)``.
+    Used by :func:`app.processing.bbo_cache.enrich_with_bbo` for
+    historical Lee-Ready re-runs (the live ingester also keeps an
+    in-memory mirror for the real-time path). Promoted to a hypertable
+    in migration 0006 with 7-day retention.
+    """
+
+    __tablename__ = "bbo_book"
+
+    ts: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), primary_key=True, nullable=False
+    )
+    symbol: Mapped[str] = mapped_column(Text, primary_key=True, nullable=False)
+    instrument_id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, nullable=False
+    )
+
+    expiration: Mapped[datetime | None] = mapped_column(Date, nullable=True)
+    strike: Mapped[float | None] = mapped_column(Numeric(20, 6), nullable=True)
+    option_type: Mapped[str | None] = mapped_column(CHAR(1), nullable=True)
+
+    bid_px: Mapped[float | None] = mapped_column(Numeric(20, 6), nullable=True)
+    bid_sz: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    ask_px: Mapped[float | None] = mapped_column(Numeric(20, 6), nullable=True)
+    ask_sz: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    source: Mapped[str | None] = mapped_column(Text, nullable=True)
+    """``cmbp-1`` (default) or ``bbo-1s`` (Rev 4 sampled feed)."""
+
+    __table_args__ = (
+        Index("ix_bbo_book_symbol_ts", "symbol", "ts"),
+        Index(
+            "ix_bbo_book_contract_ts",
+            "symbol",
+            "expiration",
+            "strike",
+            "option_type",
+            "ts",
+        ),
+    )
+
+
 class FlowEvent(Base):
     """Detected sweeps / blocks / UOA. Persisted for the website + alerts."""
 

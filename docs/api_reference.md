@@ -148,6 +148,26 @@ Lightweight spot-resolution endpoint. Same `spot` block as
 `parity`, or `stale_cache`. `session_state` is included so the
 client can render an RTH banner without a second roundtrip.
 
+## Lee-Ready trade-side classification *(Rev 4 — Agent 4)*
+
+Internally the platform uses two paths to classify each option trade
+as customer-buy (+1), customer-sell (-1), or unclassified (0):
+
+* **Live path** — the ingester applies `quote_or_tick_rule()` on each
+  incoming trade using the most recent BBO from
+  `InMemoryBboCache` (fed by cmbp-1 and bbo-1s) and a per-instrument
+  tick-rule history (`TickRuleState`). The result is stored on
+  `options_trades.side` and used for `HIRO` / `flow_events`.
+* **Backfill path** — `app.processing.lee_ready.classify_lee_ready_with_bbo()`
+  performs an as-of merge against the persisted `bbo_book`
+  hypertable (`enrich_with_bbo()`), then runs the standard
+  classifier. This is the path used when a historical window needs
+  to be reclassified after a fix to the rule or after a gap.
+
+The BBO cache enforces a configurable freshness window (default 2 s)
+to avoid stale quotes contaminating Lee-Ready, and the as-of merge
+applies the same tolerance per row.
+
 ## Administrative endpoints (`Authorization: Bearer <jwt>`)
 
 * `POST /admin/login` — exchange username/password for a JWT.
